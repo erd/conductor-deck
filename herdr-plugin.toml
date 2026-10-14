@@ -1,0 +1,24 @@
+id = "conductor-deck"
+name = "Conductor Deck"
+version = "0.1.0"
+description = "Conductor tasks as stacked cards, docked beside the conductor pane"
+min_herdr_version = "0.9.4"
+platforms = ["macos", "linux"]
+
+# Runs on `herdr plugin install` only; `herdr plugin link` does not build.
+[[build]]
+command = ["cargo", "build", "--release"]
+
+# herdr runs commands as argv with no shell, so a shell expands HERDR_PLUGIN_ROOT. Plugin panes
+# start with a minimal PATH, so every path is absolute.
+[[panes]]
+id = "deck"
+title = "conductor"
+placement = "split"
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/conductor-deck\""]
+
+[[actions]]
+id = "toggle"
+title = "Toggle conductor deck"
+contexts = ["pane"]
+command = ["/bin/sh", "-c", "exec /bin/sh \"$HERDR_PLUGIN_ROOT/scripts/toggle.sh\""]
