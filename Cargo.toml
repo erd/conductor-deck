@@ -1,0 +1,25 @@
+[package]
+name = "conductor-deck"
+description = "herdr plugin that shows conductor tasks as stacked cards"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+repository = "https://github.com/erd/conductor-deck"
+publish = false
+
+[dependencies]
+conductor-state = { git = "https://github.com/erd/conductor", tag = "state-v0.1.0" }
+crossterm = "0.28"
+ratatui = "0.29"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
