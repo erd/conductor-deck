@@ -23,8 +23,20 @@ herdr plugin pane open --plugin conductor-deck --entrypoint deck --placement spl
 herdr plugin log list --plugin conductor-deck
 ```
 
-Rebuild with `cargo build --release` after changes, then reopen the pane. Press `q` or Ctrl-C to
-close the deck. Remove the link with `herdr plugin unlink conductor-deck`.
+Rebuild with `cargo build --release` after changes, then reopen the pane. Remove the link with
+`herdr plugin unlink conductor-deck`.
+
+The UI snapshot tests use [insta](https://insta.rs). After a deliberate change to the screen, run
+`cargo insta review` (or `INSTA_UPDATE=always cargo test`) and check the diffs in
+`src/ui/snapshots/`.
+
+## Keys
+
+| Key | Does |
+| --- | --- |
+| `j`/`k`, `↓`/`↑`, mouse wheel | Move the selection |
+| `L` | Show or hide torn-down and abandoned tasks |
+| `q`, Ctrl-C | Close the deck |
 
 To check the herdr client against a running herdr, run the binary with `--probe` from any herdr
 pane. It prints the plugin context, the conductor repo that workspace maps to (or why there is

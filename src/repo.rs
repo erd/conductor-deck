@@ -9,8 +9,8 @@ use crate::herdr::{self, HerdrClient};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Location {
-    /// A repo with a conductor record in `repos/<repo_id>/`.
-    Repo { repo_id: String },
+    /// A repo with a conductor record in `repos/<repo_id>/`; `name` is its root's directory name.
+    Repo { repo_id: String, name: String },
     /// The deck's workspace has no conductor; `reason` says why.
     NoConductor { reason: String },
 }
@@ -36,7 +36,13 @@ pub fn locate_dir(dir: &Path, home: &Home) -> Location {
         Err(err) => return no_conductor(err.to_string()),
     };
     match read_repo_record(&home.repo_dir(&ident.id)) {
-        Ok(Some(_)) => Location::Repo { repo_id: ident.id },
+        Ok(Some(_)) => Location::Repo {
+            name: ident.root.file_name().map_or_else(
+                || ident.id.clone(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+            repo_id: ident.id,
+        },
         Ok(None) => no_conductor(format!("{} has no conductor record", ident.root.display())),
         Err(err) => no_conductor(err.to_string()),
     }
@@ -188,6 +194,12 @@ mod tests {
             herdr_pane_id: None,
         };
         write_repo_record_atomic(&repo_dir, &record).unwrap();
-        assert_eq!(locate_dir(&repo, &home), Location::Repo { repo_id });
+        assert_eq!(
+            locate_dir(&repo, &home),
+            Location::Repo {
+                repo_id,
+                name: "web".into()
+            }
+        );
     }
 }

@@ -1,0 +1,22 @@
+---
+source: src/ui/mod.rs
+expression: scrolled
+---
+"web                             !0 ●8 ⇡0"
+"┌ task-04 ─────────────────────────────┐"
+"│● Task number 4                       │"
+"│working                         30m56s│"
+"│ctx – · conductor/task-04             │"
+"└──────────────────────────────────────┘"
+"┌ task-05 ─────────────────────────────┐"
+"│● Task number 5                       │"
+"│working                         29m56s│"
+"│ctx – · conductor/task-05             │"
+"└──────────────────────────────────────┘"
+"┏ task-06 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
+"┃● Task number 6                       ┃"
+"┃working                         28m56s┃"
+"┃ctx – · conductor/task-06             ┃"
+"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+"                                        "
+"j/k move · L show all · q quit       6/8"

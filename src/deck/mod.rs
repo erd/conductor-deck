@@ -4,7 +4,7 @@
 pub mod card;
 mod task;
 #[cfg(test)]
-mod testing;
+pub mod testing;
 pub mod watch;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -202,10 +202,6 @@ impl Deck {
         self.now = now;
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "elapsed times are rendered by #4")
-    )]
     pub fn now(&self) -> Timestamp {
         self.now
     }

@@ -1,0 +1,22 @@
+---
+source: src/ui/mod.rs
+expression: top
+---
+"web                             !0 ●8 ⇡0"
+"┏ task-01 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
+"┃● Task number 1                       ┃"
+"┃working                         33m56s┃"
+"┃ctx – · conductor/task-01             ┃"
+"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+"┌ task-02 ─────────────────────────────┐"
+"│● Task number 2                       │"
+"│working                         32m56s│"
+"│ctx – · conductor/task-02             │"
+"└──────────────────────────────────────┘"
+"┌ task-03 ─────────────────────────────┐"
+"│● Task number 3                       │"
+"│working                         31m56s│"
+"│ctx – · conductor/task-03             │"
+"└──────────────────────────────────────┘"
+"                                        "
+"j/k move · L show all · q quit       1/8"

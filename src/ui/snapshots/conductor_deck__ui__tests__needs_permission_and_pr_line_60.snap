@@ -1,0 +1,18 @@
+---
+source: src/ui/mod.rs
+expression: backend
+---
+"web                                                 !2 ●0 ⇡0"
+"┏ perm-01 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
+"┃● Clean the build directory                               ┃"
+"┃needs permission                                    34m45s┃"
+"┃ctx – · conductor/perm-01                                 ┃"
+"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+"┌ pr-02 ───────────────────────────────────────────────────┐"
+"│⇡ Fix the login redirect loop                             │"
+"│working                                             14m56s│"
+"│ctx – · conductor/pr-02                                   │"
+"│PR #123 ready · checks ✓ · changes requested              │"
+"└──────────────────────────────────────────────────────────┘"
+"                                                            "
+"j/k move · L show all · q quit                           1/2"
