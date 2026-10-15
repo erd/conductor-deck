@@ -160,7 +160,7 @@ fn context_line(card: &CardModel, width: usize) -> Line<'static> {
 
 /// `PR #123 ready · checks ✓ · approved`; the parts herdr or GitHub haven't reported are left out.
 fn pr_line(card: &CardModel, width: usize) -> Line<'static> {
-    let number = pr_url(card).and_then(pr_number);
+    let number = card.pr_url().and_then(pr_number);
     let mut spans = vec![Span::raw(match number {
         Some(number) => format!("PR #{number}"),
         None => "PR".to_owned(),
@@ -202,11 +202,7 @@ fn pr_line(card: &CardModel, width: usize) -> Line<'static> {
 }
 
 fn has_pr(card: &CardModel) -> bool {
-    card.live.pr.is_some() || pr_url(card).is_some()
-}
-
-fn pr_url(card: &CardModel) -> Option<&str> {
-    card.task.pr_url.as_deref().or(card.live.pr_url.as_deref())
+    card.live.pr.is_some() || card.pr_url().is_some()
 }
 
 /// The number at the end of a GitHub PR URL.

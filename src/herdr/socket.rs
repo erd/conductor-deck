@@ -57,6 +57,7 @@ impl SocketClient {
         Ok(Self::new(path))
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn with_backoff(mut self, backoff: Backoff) -> Self {
         self.backoff = backoff;
@@ -81,6 +82,11 @@ impl HerdrClient for SocketClient {
     fn agent_focus(&self, pane: &str) -> Result<()> {
         self.conn
             .request("agent.focus", &json!({ "target": pane }))?;
+        Ok(())
+    }
+
+    fn tab_focus(&self, tab: &str) -> Result<()> {
+        self.conn.request("tab.focus", &json!({ "tab_id": tab }))?;
         Ok(())
     }
 
@@ -501,6 +507,7 @@ mod tests {
             respond(json!({ "type": "ok" })),
             respond(json!({ "type": "agent_prompted", "agent": {} })),
             respond(json!({ "type": "layout_split_ratio_set", "layout": {} })),
+            respond(json!({ "type": "ok" })),
         ]);
         let herdr = client(&server);
         herdr.agent_focus("w1:p1").unwrap();
@@ -508,6 +515,7 @@ mod tests {
         herdr
             .set_split_ratio("w1:t1", &[false, true], 0.75)
             .unwrap();
+        herdr.tab_focus("w1:t1").unwrap();
         let params: Vec<Value> = server
             .requests()
             .iter()
@@ -515,13 +523,19 @@ mod tests {
             .collect();
         assert_eq!(
             server.methods(),
-            ["agent.focus", "agent.prompt", "layout.set_split_ratio"]
+            [
+                "agent.focus",
+                "agent.prompt",
+                "layout.set_split_ratio",
+                "tab.focus"
+            ]
         );
         assert_eq!(params[1], json!({ "target": "w1:p1", "text": "hi" }));
         assert_eq!(
             params[2],
             json!({ "tab_id": "w1:t1", "path": [false, true], "ratio": 0.75 })
         );
+        assert_eq!(params[3], json!({ "tab_id": "w1:t1" }));
     }
 
     #[test]

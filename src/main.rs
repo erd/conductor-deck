@@ -1,8 +1,5 @@
+mod actions;
 mod deck;
-#[expect(
-    dead_code,
-    reason = "agent focus/prompt and split ratio are consumed by the deck UI in #5-#7"
-)]
 mod herdr;
 mod repo;
 mod ui;
@@ -23,16 +20,19 @@ use jiff::Timestamp;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use deck::Deck;
 use deck::watch::{Change, TaskWatcher};
+use deck::{CardModel, Deck};
+use herdr::types::PluginContext;
 use herdr::{Forwarding, HerdrClient, HerdrError, HerdrEvent, SocketClient};
 use repo::Location;
-use ui::{Action, Body, Selection, View};
+use ui::{Action, Body, Input, InputOutcome, Selection, View};
 
 type BoxError = Box<dyn std::error::Error>;
 
 /// How often elapsed times move on screen.
 const TICK: Duration = Duration::from_secs(1);
+/// How long a toast stays up.
+const TOAST: Duration = Duration::from_secs(4);
 
 fn main() -> ExitCode {
     let result = if std::env::args().skip(1).any(|arg| arg == "--probe") {
@@ -89,6 +89,8 @@ fn show_until_quit(
             body,
             now: Timestamp::now(),
             show_hidden: false,
+            toast: None,
+            input: None,
         };
         terminal.draw(|frame| ui::draw(frame, &view, &mut selection))?;
         match rx.recv() {
@@ -161,6 +163,8 @@ fn spawn_input(tx: Sender<AppEvent>) -> io::Result<()> {
 
 struct App<'a> {
     herdr: &'a SocketClient,
+    /// The deck's own pane and tab.
+    context: PluginContext,
     deck: Deck,
     /// The repo's name, for the header.
     repo: String,
@@ -172,6 +176,17 @@ struct App<'a> {
     subscription: Option<(Vec<String>, Forwarding)>,
     /// The latest herdr or state error, shown until the next herdr refresh succeeds.
     problem: Option<String>,
+    /// A message and when it goes away.
+    toast: Option<(String, Instant)>,
+    /// The message being typed, while `m` is open.
+    compose: Option<Compose>,
+}
+
+/// A message to a worker, being typed.
+struct Compose {
+    task_id: String,
+    pane: String,
+    input: Input,
 }
 
 impl<'a> App<'a> {
@@ -187,6 +202,7 @@ impl<'a> App<'a> {
             let _ = files.send(AppEvent::Files(change));
         })?;
         Ok(Self {
+            context: herdr.plugin_context()?,
             herdr,
             deck,
             repo,
@@ -196,6 +212,8 @@ impl<'a> App<'a> {
             _watcher: watcher,
             subscription: None,
             problem: None,
+            toast: None,
+            compose: None,
         })
     }
 
@@ -209,6 +227,13 @@ impl<'a> App<'a> {
                 self.problem = refreshed.err().map(|err| err.to_string());
                 next_tick = Instant::now() + TICK;
             }
+            if self
+                .toast
+                .as_ref()
+                .is_some_and(|(_, until)| Instant::now() >= *until)
+            {
+                self.toast = None;
+            }
             let cards = self.deck.cards();
             let task_error =
                 (self.deck.errors().iter().next()).map(|(id, err)| format!("task {id}: {err}"));
@@ -220,13 +245,19 @@ impl<'a> App<'a> {
                 },
                 now: self.deck.now(),
                 show_hidden: self.deck.show_hidden,
+                toast: self.toast.as_ref().map(|(text, _)| text.as_str()),
+                input: self.compose.as_ref().map(|compose| compose.input.text()),
             };
             terminal.draw(|frame| ui::draw(frame, &view, &mut self.selection))?;
             let ids: Vec<&str> = cards.iter().map(|card| card.task.id.as_str()).collect();
 
+            let wake = match &self.toast {
+                Some((_, until)) => next_tick.min(*until),
+                None => next_tick,
+            };
             let first = match self
                 .rx
-                .recv_timeout(next_tick.saturating_duration_since(Instant::now()))
+                .recv_timeout(wake.saturating_duration_since(Instant::now()))
             {
                 Ok(event) => Some(event),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -238,15 +269,11 @@ impl<'a> App<'a> {
             let pending: Vec<_> = first.into_iter().chain(self.rx.try_iter()).collect();
             for event in pending {
                 match event {
-                    AppEvent::Input(event) => match ui::action(&event) {
-                        Some(Action::Quit) => return Ok(()),
-                        Some(Action::Up) => self.selection.move_by(&ids, -1),
-                        Some(Action::Down) => self.selection.move_by(&ids, 1),
-                        Some(Action::ToggleHidden) => {
-                            self.deck.show_hidden = !self.deck.show_hidden;
+                    AppEvent::Input(event) => {
+                        if !self.handle_input(&event, &cards, &ids) {
+                            return Ok(());
                         }
-                        None => {}
-                    },
+                    }
                     AppEvent::Redraw => {}
                     AppEvent::Files(Change::Task(id)) => {
                         changed.insert(id);
@@ -266,6 +293,78 @@ impl<'a> App<'a> {
                     self.deck.task_changed(&id);
                 }
             }
+        }
+    }
+
+    /// Acts on a key press or click, against the cards as last drawn. Returns `false` to quit.
+    fn handle_input(&mut self, event: &Event, cards: &[CardModel], ids: &[&str]) -> bool {
+        if let Some(compose) = &mut self.compose {
+            if let Event::Key(key) = event {
+                match compose.input.handle(key) {
+                    InputOutcome::Editing => {}
+                    InputOutcome::Cancel => self.compose = None,
+                    InputOutcome::Send(text) => {
+                        let toast = actions::send_message(
+                            self.herdr,
+                            &compose.task_id,
+                            &compose.pane,
+                            &text,
+                        );
+                        self.compose = None;
+                        self.show(toast);
+                    }
+                }
+            }
+            return true;
+        }
+        let Some(action) = ui::action(event) else {
+            return true;
+        };
+        let selected = self.selection.resolve(ids).map(|index| &cards[index]);
+        let toast = match action {
+            Action::Quit => return false,
+            Action::Up => {
+                self.selection.move_by(ids, -1);
+                None
+            }
+            Action::Down => {
+                self.selection.move_by(ids, 1);
+                None
+            }
+            Action::ToggleHidden => {
+                self.deck.show_hidden = !self.deck.show_hidden;
+                None
+            }
+            Action::Focus => selected.and_then(|card| actions::focus_worker(self.herdr, card)),
+            Action::Click { row } => self.selection.card_at(row).and_then(|index| {
+                self.selection.select_index(ids, index);
+                actions::focus_worker(self.herdr, &cards[index])
+            }),
+            Action::Message => selected.and_then(|card| match actions::start_message(card) {
+                Ok(pane) => {
+                    self.compose = Some(Compose {
+                        task_id: card.task.id.clone(),
+                        pane,
+                        input: Input::default(),
+                    });
+                    None
+                }
+                Err(toast) => Some(toast),
+            }),
+            Action::OpenPr => {
+                selected.and_then(|card| actions::open_pr(card, actions::launch_browser))
+            }
+            Action::FocusConductor => {
+                actions::focus_conductor(self.herdr, &self.deck.repo_dir(), &self.context)
+            }
+        };
+        self.show(toast);
+        true
+    }
+
+    fn show(&mut self, toast: Option<String>) {
+        if let Some(text) = toast {
+            self.toast = Some((text, Instant::now() + TOAST));
         }
     }
 
