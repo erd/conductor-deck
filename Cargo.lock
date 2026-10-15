@@ -62,6 +62,9 @@ dependencies = [
  "conductor-state",
  "crossterm",
  "ratatui",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

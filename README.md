@@ -26,6 +26,14 @@ herdr plugin log list --plugin conductor-deck
 Rebuild with `cargo build --release` after changes, then reopen the pane. Press `q` or Ctrl-C to
 close the deck. Remove the link with `herdr plugin unlink conductor-deck`.
 
+To check the herdr client against a running herdr, run the binary with `--probe` from any herdr
+pane. It prints the plugin context and each pane's agent status and token readouts in that
+workspace, then exits:
+
+```sh
+cargo run -- --probe
+```
+
 The Rust toolchain is pinned in `rust-toolchain.toml` to match
 [erd/conductor](https://github.com/erd/conductor). CI runs `cargo fmt --check`,
 `cargo clippy -- -D warnings` and `cargo test`.
