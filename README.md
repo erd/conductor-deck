@@ -27,8 +27,8 @@ Rebuild with `cargo build --release` after changes, then reopen the pane. Press 
 close the deck. Remove the link with `herdr plugin unlink conductor-deck`.
 
 To check the herdr client against a running herdr, run the binary with `--probe` from any herdr
-pane. It prints the plugin context and each pane's agent status and token readouts in that
-workspace, then exits:
+pane. It prints the plugin context, the conductor repo that workspace maps to (or why there is
+none), and each pane's agent status and token readouts in that workspace, then exits:
 
 ```sh
 cargo run -- --probe

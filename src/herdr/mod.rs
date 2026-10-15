@@ -10,7 +10,7 @@ pub mod socket;
 mod test_server;
 pub mod types;
 
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 
 pub use error::{HerdrError, Result};
 pub use event::HerdrEvent;
@@ -39,5 +39,36 @@ pub trait HerdrClient {
 /// A live event stream. Dropping it stops the background reader.
 pub struct Subscription {
     pub events: Receiver<HerdrEvent>,
+    _stop: Option<StopHandle>,
+}
+
+impl Subscription {
+    /// Sends every event to `tx`, wrapped by `wrap`, from a background thread, so one channel
+    /// can carry herdr events alongside others. Dropping the returned [`Forwarding`] stops the
+    /// subscription, and the thread ends once the stream does or `tx`'s receiver is gone.
+    pub fn forward<T: Send + 'static>(
+        self,
+        tx: Sender<T>,
+        wrap: impl Fn(HerdrEvent) -> T + Send + 'static,
+    ) -> std::io::Result<Forwarding> {
+        let Subscription {
+            events,
+            _stop: stop,
+        } = self;
+        std::thread::Builder::new()
+            .name("herdr-forward".into())
+            .spawn(move || {
+                for event in events {
+                    if tx.send(wrap(event)).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        Ok(Forwarding { _stop: stop })
+    }
+}
+
+/// Keeps a forwarded [`Subscription`] running until dropped.
+pub struct Forwarding {
     _stop: Option<StopHandle>,
 }
