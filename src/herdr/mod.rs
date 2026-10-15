@@ -16,7 +16,7 @@ pub use error::{HerdrError, Result};
 pub use event::HerdrEvent;
 pub use socket::SocketClient;
 use socket::StopHandle;
-use types::{Agent, PluginContext, Snapshot};
+use types::{Agent, Layout, LayoutTree, PluginContext, Snapshot};
 
 pub trait HerdrClient {
     /// The deck's own pane, tab and workspace.
@@ -29,12 +29,18 @@ pub trait HerdrClient {
     fn tab_focus(&self, tab: &str) -> Result<()>;
     /// Fails with [`HerdrError::AgentBlocked`] if the agent is waiting on its own question.
     fn agent_prompt(&self, pane: &str, text: &str) -> Result<()>;
+    /// The geometry of the tab holding `pane`.
+    fn pane_layout(&self, pane: &str) -> Result<Layout>;
+    /// The split tree of `tab`.
+    fn layout_export(&self, tab: &str) -> Result<LayoutTree>;
     /// `path` walks the tab's split tree from the root; `ratio` is the first child's share.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the deck sets its own width in #7")
-    )]
-    fn set_split_ratio(&self, tab: &str, path: &[bool], ratio: f32) -> Result<()>;
+    /// Returns the tree as herdr stored it, which clamps `ratio` into 0.1..=0.9.
+    fn set_split_ratio(&self, tab: &str, path: &[bool], ratio: f32) -> Result<LayoutTree>;
+    /// Opens `plugin`'s `entrypoint` pane in a split to the right of `beside`, without focusing
+    /// it. Returns the new pane's id.
+    fn plugin_pane_open(&self, plugin: &str, entrypoint: &str, beside: &str) -> Result<String>;
+    fn plugin_pane_focus(&self, pane: &str) -> Result<()>;
+    fn plugin_pane_close(&self, pane: &str) -> Result<()>;
     /// Streams pane, layout and workspace events, plus agent status changes for `watch_panes`
     /// (herdr only reports those per pane). The stream starts with [`HerdrEvent::Resync`], and
     /// resyncs again after it falls behind or reconnects. To change the watched panes, drop the

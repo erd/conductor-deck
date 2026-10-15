@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use super::error::{HerdrError, Result};
 use super::event::{AGENT_STATUS_SUBSCRIPTION, GLOBAL_SUBSCRIPTIONS, HerdrEvent, decode_event};
-use super::types::{Agent, PluginContext, Snapshot};
+use super::types::{Agent, Layout, LayoutTree, PluginContext, Snapshot};
 use super::{HerdrClient, Subscription};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -97,10 +97,59 @@ impl HerdrClient for SocketClient {
         expect_type(&result, "agent_prompted")
     }
 
-    fn set_split_ratio(&self, tab: &str, path: &[bool], ratio: f32) -> Result<()> {
+    fn pane_layout(&self, pane: &str) -> Result<Layout> {
+        let result = self
+            .conn
+            .request("pane.layout", &json!({ "pane_id": pane }))?;
+        decode_result(result, "pane_layout", "layout")
+    }
+
+    fn layout_export(&self, tab: &str) -> Result<LayoutTree> {
+        let result = self
+            .conn
+            .request("layout.export", &json!({ "tab_id": tab }))?;
+        decode_result(result, "layout_export", "layout")
+    }
+
+    fn set_split_ratio(&self, tab: &str, path: &[bool], ratio: f32) -> Result<LayoutTree> {
         let params = json!({ "tab_id": tab, "path": path, "ratio": ratio });
         let result = self.conn.request("layout.set_split_ratio", &params)?;
-        expect_type(&result, "layout_split_ratio_set")
+        decode_result(result, "layout_split_ratio_set", "layout")
+    }
+
+    fn plugin_pane_open(&self, plugin: &str, entrypoint: &str, beside: &str) -> Result<String> {
+        #[derive(Deserialize)]
+        struct Opened {
+            pane: PaneId,
+        }
+        #[derive(Deserialize)]
+        struct PaneId {
+            pane_id: String,
+        }
+        let params = json!({
+            "plugin_id": plugin,
+            "entrypoint": entrypoint,
+            "placement": "split",
+            "direction": "right",
+            "target_pane_id": beside,
+        });
+        let result = self.conn.request("plugin.pane.open", &params)?;
+        let opened: Opened = decode_result(result, "plugin_pane_opened", "plugin_pane")?;
+        Ok(opened.pane.pane_id)
+    }
+
+    fn plugin_pane_focus(&self, pane: &str) -> Result<()> {
+        let result = self
+            .conn
+            .request("plugin.pane.focus", &json!({ "pane_id": pane }))?;
+        expect_type(&result, "plugin_pane_focused")
+    }
+
+    fn plugin_pane_close(&self, pane: &str) -> Result<()> {
+        let result = self
+            .conn
+            .request("plugin.pane.close", &json!({ "pane_id": pane }))?;
+        expect_type(&result, "plugin_pane_closed")
     }
 
     fn subscribe(&self, watch_panes: &[String]) -> Result<Subscription> {
@@ -438,7 +487,7 @@ mod tests {
         TestServer, error_line, respond, respond_error, respond_raw, snapshot_result, socket_path,
         subscription,
     };
-    use crate::herdr::types::AgentStatus;
+    use crate::herdr::types::{AgentStatus, LayoutNode, SplitDirection};
 
     const WAIT: Duration = Duration::from_secs(5);
 
@@ -501,21 +550,35 @@ mod tests {
         assert_eq!(agent.tokens.limit.as_deref(), Some("5h 68%"));
     }
 
+    /// A two-pane tree, as herdr 0.9.5 exports it.
+    fn tree(ratio: f32) -> Value {
+        json!({
+            "workspace_id": "w1", "tab_id": "w1:t1", "zoomed": false, "focused_pane_id": "w1:p1",
+            "root": { "type": "split", "direction": "right", "ratio": ratio,
+                "first": { "type": "pane", "pane_id": "w1:p1", "cwd": "/src" },
+                "second": { "type": "pane", "pane_id": "w1:p2", "cwd": "/src" } }
+        })
+    }
+
     #[test]
     fn sends_action_params() {
         let server = TestServer::start(vec![
             respond(json!({ "type": "ok" })),
             respond(json!({ "type": "agent_prompted", "agent": {} })),
-            respond(json!({ "type": "layout_split_ratio_set", "layout": {} })),
+            respond(json!({ "type": "layout_split_ratio_set", "layout": tree(0.75) })),
             respond(json!({ "type": "ok" })),
+            respond(json!({ "type": "plugin_pane_focused", "plugin_pane": {} })),
+            respond(json!({ "type": "plugin_pane_closed", "pane_id": "w1:p2" })),
         ]);
         let herdr = client(&server);
         herdr.agent_focus("w1:p1").unwrap();
         herdr.agent_prompt("w1:p1", "hi").unwrap();
-        herdr
+        let stored = herdr
             .set_split_ratio("w1:t1", &[false, true], 0.75)
             .unwrap();
         herdr.tab_focus("w1:t1").unwrap();
+        herdr.plugin_pane_focus("w1:p2").unwrap();
+        herdr.plugin_pane_close("w1:p2").unwrap();
         let params: Vec<Value> = server
             .requests()
             .iter()
@@ -527,7 +590,9 @@ mod tests {
                 "agent.focus",
                 "agent.prompt",
                 "layout.set_split_ratio",
-                "tab.focus"
+                "tab.focus",
+                "plugin.pane.focus",
+                "plugin.pane.close",
             ]
         );
         assert_eq!(params[1], json!({ "target": "w1:p1", "text": "hi" }));
@@ -535,7 +600,79 @@ mod tests {
             params[2],
             json!({ "tab_id": "w1:t1", "path": [false, true], "ratio": 0.75 })
         );
+        assert!(
+            matches!(stored.root, LayoutNode::Split { ratio, .. } if (ratio - 0.75).abs() < 1e-6)
+        );
         assert_eq!(params[3], json!({ "tab_id": "w1:t1" }));
+        assert_eq!(params[4], json!({ "pane_id": "w1:p2" }));
+        assert_eq!(params[5], json!({ "pane_id": "w1:p2" }));
+    }
+
+    #[test]
+    fn reads_layouts_and_opens_plugin_panes() {
+        let server = TestServer::start(vec![
+            respond(json!({ "type": "layout_export", "layout": tree(0.5) })),
+            respond(json!({ "type": "pane_layout", "layout": {
+                "workspace_id": "w1", "tab_id": "w1:t1", "zoomed": false, "focused_pane_id": "w1:p1",
+                "area": { "x": 0, "y": 0, "width": 132, "height": 42 },
+                "panes": [
+                    { "pane_id": "w1:p1", "focused": true,
+                      "rect": { "x": 0, "y": 0, "width": 66, "height": 42 } },
+                    { "pane_id": "w1:p2", "focused": false,
+                      "rect": { "x": 66, "y": 0, "width": 66, "height": 42 } },
+                ],
+                "splits": [{ "id": "split_0_root", "direction": "right", "ratio": 0.5,
+                             "rect": { "x": 0, "y": 0, "width": 132, "height": 42 } }],
+            } })),
+            respond(json!({ "type": "plugin_pane_opened", "plugin_pane": {
+                "plugin_id": "conductor-deck", "entrypoint": "deck",
+                "pane": { "pane_id": "w1:p3", "tab_id": "w1:t1", "workspace_id": "w1",
+                          "terminal_id": "t", "focused": false, "agent_status": "unknown" },
+            } })),
+        ]);
+        let herdr = client(&server);
+
+        let tree = herdr.layout_export("w1:t1").unwrap();
+        assert_eq!(tree.tab_id, "w1:t1");
+        let LayoutNode::Split {
+            direction, second, ..
+        } = tree.root
+        else {
+            panic!("expected a split root");
+        };
+        assert_eq!(direction, SplitDirection::Right);
+        assert_eq!(
+            *second,
+            LayoutNode::Pane {
+                pane_id: Some("w1:p2".into())
+            }
+        );
+
+        let layout = herdr.pane_layout("w1:p2").unwrap();
+        assert_eq!(layout.area.width, 132);
+        assert_eq!(layout.panes[1].rect.x, 66);
+
+        let opened = herdr
+            .plugin_pane_open("conductor-deck", "deck", "w1:p1")
+            .unwrap();
+        assert_eq!(opened, "w1:p3");
+
+        let params: Vec<Value> = server
+            .requests()
+            .iter()
+            .map(|r| r["params"].clone())
+            .collect();
+        assert_eq!(
+            server.methods(),
+            ["layout.export", "pane.layout", "plugin.pane.open"]
+        );
+        assert_eq!(params[0], json!({ "tab_id": "w1:t1" }));
+        assert_eq!(params[1], json!({ "pane_id": "w1:p2" }));
+        assert_eq!(
+            params[2],
+            json!({ "plugin_id": "conductor-deck", "entrypoint": "deck", "placement": "split",
+                    "direction": "right", "target_pane_id": "w1:p1" })
+        );
     }
 
     #[test]

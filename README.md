@@ -75,3 +75,30 @@ description = "Toggle the conductor deck"
 ```
 
 Then run `herdr server reload-config`.
+
+Run from a pane, the action:
+
+- closes the deck in that pane's tab, if there is one;
+- otherwise opens a deck to the right of that pane.
+
+The action only closes decks the plugin knows about. Every deck records its own pane id in
+`$HERDR_PLUGIN_STATE_DIR/panes` when it starts, so this includes decks opened by conductor's
+SessionStart hook. A pane titled `conductor` that the plugin didn't record is focused, never
+closed, and the action doesn't open a second deck beside it.
+
+## Width
+
+The deck holds itself at `deck_width` columns, 48 by default. Set it in conductor's
+`~/.config/conductor/config.toml`, globally or for one repo:
+
+```toml
+deck_width = 56
+
+[repos."<repo-id>"]
+deck_width = 40
+```
+
+herdr sizes splits by ratio, so the deck rewrites its split's ratio 200 ms after the layout or
+the terminal stops changing. When you drag the divider yourself, the deck keeps your width until it
+closes. It always leaves at least 20 columns beside itself, and herdr keeps each side of a split
+between 10% and 90% of its width.

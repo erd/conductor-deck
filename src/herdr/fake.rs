@@ -4,7 +4,10 @@ use std::collections::HashSet;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use super::types::{Agent, PluginContext, Snapshot};
+use super::types::{
+    Agent, AgentStatus, Layout, LayoutNode, LayoutPane, LayoutTree, Pane, PluginContext, Rect,
+    Snapshot, SplitDirection, Tokens,
+};
 use super::{HerdrClient, HerdrError, HerdrEvent, Result, Subscription};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20,11 +23,26 @@ pub enum Action {
         path: Vec<bool>,
         ratio: f32,
     },
+    OpenPluginPane {
+        plugin: String,
+        entrypoint: String,
+        beside: String,
+    },
+    FocusPluginPane(String),
+    ClosePluginPane(String),
+}
+
+/// One tab's split tree and the area it fills; the fake derives pane geometry from both.
+#[derive(Debug, Clone)]
+pub struct FakeTab {
+    pub tree: LayoutTree,
+    pub area: Rect,
 }
 
 pub struct FakeHerdr {
     pub context: PluginContext,
     pub snapshot: Mutex<Snapshot>,
+    pub tabs: Mutex<Vec<FakeTab>>,
     actions: Mutex<Vec<Action>>,
     blocked: Mutex<HashSet<String>>,
     gone: Mutex<HashSet<String>>,
@@ -40,6 +58,7 @@ impl FakeHerdr {
         Self {
             context,
             snapshot: Mutex::new(snapshot),
+            tabs: Mutex::default(),
             actions: Mutex::default(),
             blocked: Mutex::default(),
             gone: Mutex::default(),
@@ -65,6 +84,33 @@ impl FakeHerdr {
     /// Delivers `event` to every live subscription.
     pub fn emit(&self, event: &HerdrEvent) {
         lock(&self.subscribers).retain(|tx| tx.send(event.clone()).is_ok());
+    }
+
+    /// Adds a tab whose layout the fake reports and updates.
+    pub fn add_tab(&self, root: LayoutNode, tab: &str, width: u16) {
+        lock(&self.tabs).push(FakeTab {
+            tree: LayoutTree {
+                tab_id: tab.to_owned(),
+                zoomed: false,
+                root,
+            },
+            area: Rect {
+                x: 0,
+                y: 0,
+                width,
+                height: 40,
+            },
+        });
+    }
+
+    /// Runs `change` on `tab`, as a user dragging a divider or resizing the terminal would.
+    pub fn edit_tab(&self, tab: &str, change: impl FnOnce(&mut FakeTab)) {
+        let mut tabs = lock(&self.tabs);
+        change(
+            tabs.iter_mut()
+                .find(|t| t.tree.tab_id == tab)
+                .expect("tab exists"),
+        );
     }
 
     fn record(&self, action: Action) {
@@ -126,12 +172,98 @@ impl HerdrClient for FakeHerdr {
         Ok(())
     }
 
-    fn set_split_ratio(&self, tab: &str, path: &[bool], ratio: f32) -> Result<()> {
+    fn pane_layout(&self, pane: &str) -> Result<Layout> {
+        lock(&self.tabs)
+            .iter()
+            .find_map(|tab| {
+                let mut panes = Vec::new();
+                place(&tab.tree.root, tab.area, &mut panes);
+                panes.iter().any(|p| p.pane_id == pane).then(|| Layout {
+                    workspace_id: workspace_of(&tab.tree.tab_id),
+                    tab_id: tab.tree.tab_id.clone(),
+                    zoomed: tab.tree.zoomed,
+                    area: tab.area,
+                    panes,
+                    splits: Vec::new(),
+                })
+            })
+            .ok_or_else(|| not_found(pane))
+    }
+
+    fn layout_export(&self, tab: &str) -> Result<LayoutTree> {
+        lock(&self.tabs)
+            .iter()
+            .find(|t| t.tree.tab_id == tab)
+            .map(|t| t.tree.clone())
+            .ok_or_else(|| not_found(tab))
+    }
+
+    fn set_split_ratio(&self, tab: &str, path: &[bool], ratio: f32) -> Result<LayoutTree> {
         self.record(Action::SetSplitRatio {
             tab: tab.to_owned(),
             path: path.to_vec(),
             ratio,
         });
+        let mut tabs = lock(&self.tabs);
+        let tree = &mut tabs
+            .iter_mut()
+            .find(|t| t.tree.tab_id == tab)
+            .ok_or_else(|| not_found(tab))?
+            .tree;
+        let mut node = &mut tree.root;
+        for &second in path {
+            match node {
+                LayoutNode::Split {
+                    first, second: s, ..
+                } => node = if second { s } else { first },
+                LayoutNode::Pane { .. } => return Err(not_found("split")),
+            }
+        }
+        let LayoutNode::Split { ratio: stored, .. } = node else {
+            return Err(not_found("split"));
+        };
+        *stored = ratio.clamp(0.1, 0.9);
+        Ok(tree.clone())
+    }
+
+    fn plugin_pane_open(&self, plugin: &str, entrypoint: &str, beside: &str) -> Result<String> {
+        self.check_present(beside)?;
+        self.record(Action::OpenPluginPane {
+            plugin: plugin.to_owned(),
+            entrypoint: entrypoint.to_owned(),
+            beside: beside.to_owned(),
+        });
+        let mut snapshot = lock(&self.snapshot);
+        let target = snapshot
+            .panes
+            .iter()
+            .find(|p| p.pane_id == beside)
+            .cloned()
+            .ok_or_else(|| not_found(beside))?;
+        let pane_id = format!("{}:p{}", target.workspace_id, 100 + snapshot.panes.len());
+        snapshot.panes.push(Pane {
+            pane_id: pane_id.clone(),
+            label: Some("conductor".into()),
+            agent: None,
+            status: AgentStatus::Unknown,
+            focused: false,
+            tokens: Tokens::default(),
+            cwd: None,
+            ..target
+        });
+        Ok(pane_id)
+    }
+
+    fn plugin_pane_focus(&self, pane: &str) -> Result<()> {
+        self.check_present(pane)?;
+        self.record(Action::FocusPluginPane(pane.to_owned()));
+        Ok(())
+    }
+
+    fn plugin_pane_close(&self, pane: &str) -> Result<()> {
+        self.check_present(pane)?;
+        self.record(Action::ClosePluginPane(pane.to_owned()));
+        lock(&self.snapshot).panes.retain(|p| p.pane_id != pane);
         Ok(())
     }
 
@@ -148,10 +280,71 @@ impl HerdrClient for FakeHerdr {
     }
 }
 
+fn not_found(what: &str) -> HerdrError {
+    HerdrError::NotFound {
+        code: "not_found".into(),
+        message: format!("{what} not found"),
+    }
+}
+
+fn workspace_of(tab: &str) -> String {
+    tab.split(':').next().unwrap_or_default().to_owned()
+}
+
+/// Lays `node` out over `area` the way herdr 0.9.5 does: the first child of a split gets
+/// `round(ratio × size)` cells and the second gets the rest, with no divider cell.
+fn place(node: &LayoutNode, area: Rect, out: &mut Vec<LayoutPane>) {
+    match node {
+        LayoutNode::Pane { pane_id } => out.push(LayoutPane {
+            pane_id: pane_id.clone().unwrap_or_default(),
+            rect: area,
+        }),
+        LayoutNode::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => {
+            let size = match direction {
+                SplitDirection::Right => area.width,
+                SplitDirection::Down => area.height,
+            };
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a share of a u16 fits in a u16"
+            )]
+            let cut = (ratio * f32::from(size)).round() as u16;
+            let (a, b) = match direction {
+                SplitDirection::Right => (
+                    Rect { width: cut, ..area },
+                    Rect {
+                        x: area.x + cut,
+                        width: area.width - cut,
+                        ..area
+                    },
+                ),
+                SplitDirection::Down => (
+                    Rect {
+                        height: cut,
+                        ..area
+                    },
+                    Rect {
+                        y: area.y + cut,
+                        height: area.height - cut,
+                        ..area
+                    },
+                ),
+            };
+            place(first, a, out);
+            place(second, b, out);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::herdr::types::AgentStatus;
 
     fn fake() -> FakeHerdr {
         let context = PluginContext::from_parts(None, Some("w1:p9".into()), None, None).unwrap();
@@ -176,7 +369,6 @@ mod tests {
         ] {
             assert!(matches!(result, Err(HerdrError::NotFound { .. })));
         }
-        herdr.set_split_ratio("w1:t1", &[true], 0.7).unwrap();
         assert_eq!(
             herdr.actions(),
             [
@@ -185,11 +377,6 @@ mod tests {
                 Action::Prompt {
                     pane: "w1:p1".into(),
                     text: "go".into()
-                },
-                Action::SetSplitRatio {
-                    tab: "w1:t1".into(),
-                    path: vec![true],
-                    ratio: 0.7
                 },
             ]
         );
