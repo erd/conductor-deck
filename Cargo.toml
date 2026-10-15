@@ -8,12 +8,17 @@ repository = "https://github.com/erd/conductor-deck"
 publish = false
 
 [dependencies]
-conductor-state = { git = "https://github.com/erd/conductor", tag = "state-v0.1.0" }
+conductor-state = { git = "https://github.com/erd/conductor", tag = "state-v0.2.0" }
 crossterm = "0.28"
+jiff = { version = "0.2", features = ["serde"] }
+notify = "8"
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints.rust]
 unsafe_code = "forbid"

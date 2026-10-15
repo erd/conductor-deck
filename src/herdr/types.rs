@@ -2,6 +2,7 @@
 #![expect(clippy::struct_field_names, reason = "fields mirror herdr's JSON")]
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer};
 
@@ -83,6 +84,8 @@ pub struct Pane {
     pub label: Option<String>,
     #[serde(default)]
     pub tokens: Tokens,
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -91,6 +94,16 @@ pub struct Workspace {
     pub label: String,
     #[serde(default)]
     pub focused: bool,
+    /// The git checkout herdr associates with the workspace, if any.
+    #[serde(default)]
+    pub worktree: Option<WorkspaceWorktree>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct WorkspaceWorktree {
+    /// The repo's main checkout, the same for every worktree of it.
+    pub repo_root: PathBuf,
+    pub checkout_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -265,6 +278,37 @@ mod tests {
         .unwrap();
         assert_eq!(agent.tokens.context, None);
         assert_eq!(agent.tokens.limit.as_deref(), Some("5h 68%"));
+    }
+
+    #[test]
+    fn decodes_workspace_worktree_and_pane_cwd() {
+        // Shapes captured from herdr 0.9.5.
+        let workspace: Workspace = serde_json::from_str(
+            r#"{"active_tab_id":"w6:t1","agent_status":"idle","focused":false,"label":"erd/save-28",
+                "number":2,"pane_count":2,"tab_count":2,"workspace_id":"w6",
+                "worktree":{"checkout_path":"/src/savepoint/.worktrees/erd-save-28",
+                    "is_linked_worktree":true,"repo_key":"/src/savepoint/.git",
+                    "repo_name":"savepoint","repo_root":"/src/savepoint"}}"#,
+        )
+        .unwrap();
+        let worktree = workspace.worktree.unwrap();
+        assert_eq!(worktree.repo_root, PathBuf::from("/src/savepoint"));
+        assert_eq!(
+            worktree.checkout_path,
+            PathBuf::from("/src/savepoint/.worktrees/erd-save-28")
+        );
+
+        let workspace: Workspace =
+            serde_json::from_str(r#"{"workspace_id":"w1","label":"scratch","worktree":null}"#)
+                .unwrap();
+        assert_eq!(workspace.worktree, None);
+
+        let pane: Pane = serde_json::from_str(
+            r#"{"agent_status":"unknown","cwd":"/src/scripts","foreground_cwd":"/src/scripts",
+                "pane_id":"w3:p1","tab_id":"w3:t1","workspace_id":"w3"}"#,
+        )
+        .unwrap();
+        assert_eq!(pane.cwd, Some(PathBuf::from("/src/scripts")));
     }
 
     #[test]
