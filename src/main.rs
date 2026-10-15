@@ -1,7 +1,9 @@
 mod actions;
 mod deck;
+mod dock;
 mod herdr;
 mod repo;
+mod toggle;
 mod ui;
 
 use std::collections::BTreeSet;
@@ -10,7 +12,7 @@ use std::process::ExitCode;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use conductor_state::Home;
+use conductor_state::{Config, Home, Settings};
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -22,6 +24,7 @@ use ratatui::backend::CrosstermBackend;
 
 use deck::watch::{Change, TaskWatcher};
 use deck::{CardModel, Deck};
+use dock::WidthKeeper;
 use herdr::types::PluginContext;
 use herdr::{Forwarding, HerdrClient, HerdrError, HerdrEvent, SocketClient};
 use repo::Location;
@@ -33,14 +36,16 @@ type BoxError = Box<dyn std::error::Error>;
 const TICK: Duration = Duration::from_secs(1);
 /// How long a toast stays up.
 const TOAST: Duration = Duration::from_secs(4);
+/// How long the layout must stay still before the deck checks its width.
+const LAYOUT_SETTLE: Duration = Duration::from_millis(200);
 
 fn main() -> ExitCode {
-    let result = if std::env::args().skip(1).any(|arg| arg == "--probe") {
-        SocketClient::from_env()
+    let result = match std::env::args().nth(1).as_deref() {
+        Some("--probe") => SocketClient::from_env()
             .and_then(|client| probe(&client))
-            .map_err(BoxError::from)
-    } else {
-        deck()
+            .map_err(BoxError::from),
+        Some("toggle") => run_toggle(),
+        _ => deck(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -51,9 +56,22 @@ fn main() -> ExitCode {
     }
 }
 
+/// The `toggle` action, run by `scripts/toggle.sh`.
+fn run_toggle() -> Result<(), BoxError> {
+    let herdr = SocketClient::from_env()?;
+    let panes = toggle::Panes::from_env()?;
+    let target = toggle::invoked_from()?;
+    toggle::toggle(&herdr, &panes, &target)?;
+    Ok(())
+}
+
 fn deck() -> Result<(), BoxError> {
     let herdr = SocketClient::from_env()?;
     let home = Home::resolve()?;
+    // Recorded so the toggle action can close this deck, whoever opened it.
+    let recorded = toggle::Panes::from_env()
+        .map_err(BoxError::from)
+        .and_then(|panes| Ok(panes.record(&herdr.plugin_context()?.pane_id)?));
     // A herdr that doesn't answer is shown in the pane rather than ending the deck unseen.
     let location = repo::locate(&herdr, &home);
     install_panic_hook();
@@ -63,8 +81,21 @@ fn deck() -> Result<(), BoxError> {
     spawn_input(tx.clone())?;
     match location {
         Ok(Location::Repo { repo_id, name }) => {
+            let settings = Config::load(&home.config_path()).map(|c| c.resolve(&repo_id));
+            let mut problem = recorded
+                .err()
+                .map(|err| format!("recording the deck pane: {err}"));
+            let deck_width = match settings {
+                Ok(settings) => settings.deck_width,
+                Err(err) => {
+                    problem = Some(err.to_string());
+                    Settings::default().deck_width
+                }
+            };
             let deck = Deck::open(home, repo_id)?;
-            App::new(&herdr, deck, name, tx, rx)?.run(&mut terminal)
+            App::new(&herdr, deck, name, tx, rx)?
+                .keep_width(deck_width, problem)
+                .run(&mut terminal)
         }
         Ok(Location::NoConductor { reason }) => {
             show_until_quit(&mut terminal, &rx, Body::NoConductor { reason: &reason })
@@ -139,7 +170,9 @@ fn probe(herdr: &impl HerdrClient) -> herdr::Result<()> {
 enum AppEvent {
     /// A key press or mouse event.
     Input(Event),
-    /// A resize or other terminal event that only needs a redraw.
+    /// The deck's pane changed size.
+    Resized,
+    /// A focus change or other terminal event that only needs a redraw.
     Redraw,
     Files(Change),
     Herdr(HerdrEvent),
@@ -152,6 +185,7 @@ fn spawn_input(tx: Sender<AppEvent>) -> io::Result<()> {
             while let Ok(event) = event::read() {
                 let event = match event {
                     Event::Key(_) | Event::Mouse(_) => AppEvent::Input(event),
+                    Event::Resize(..) => AppEvent::Resized,
                     _ => AppEvent::Redraw,
                 };
                 if tx.send(event).is_err() {
@@ -183,6 +217,10 @@ struct App<'a> {
     compose: Option<Compose>,
     /// The decisions being answered, while `d` is open.
     decision: Option<DecisionModal>,
+    /// Holds the deck's width in columns.
+    width: WidthKeeper,
+    /// When to check the deck's width, once the layout has stopped changing.
+    width_due: Option<Instant>,
 }
 
 /// A message to a worker, being typed.
@@ -218,7 +256,22 @@ impl<'a> App<'a> {
             toast: None,
             compose: None,
             decision: None,
+            width: WidthKeeper::new(Settings::default().deck_width),
+            width_due: None,
         })
+    }
+
+    /// Holds the deck at `columns` wide, starting now. `problem` is shown as a toast.
+    fn keep_width(mut self, columns: u16, problem: Option<String>) -> Self {
+        self.width = WidthKeeper::new(columns);
+        self.width_due = Some(Instant::now());
+        self.show(problem);
+        self
+    }
+
+    /// Checks the deck's width once layout changes stop arriving for [`LAYOUT_SETTLE`].
+    fn layout_changed(&mut self) {
+        self.width_due = Some(Instant::now() + LAYOUT_SETTLE);
     }
 
     fn run(mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), BoxError> {
@@ -230,6 +283,11 @@ impl<'a> App<'a> {
                 let refreshed = self.deck.refresh_stale_agents(self.herdr, Instant::now());
                 self.problem = refreshed.err().map(|err| err.to_string());
                 next_tick = Instant::now() + TICK;
+            }
+            if self.width_due.is_some_and(|due| Instant::now() >= due) {
+                self.width_due = None;
+                let kept = dock::keep_width(self.herdr, &mut self.width, &self.context.pane_id);
+                self.note(kept);
             }
             if self
                 .toast
@@ -256,10 +314,10 @@ impl<'a> App<'a> {
             terminal.draw(|frame| ui::draw(frame, &view, &mut self.selection))?;
             let ids: Vec<&str> = cards.iter().map(|card| card.task.id.as_str()).collect();
 
-            let wake = match &self.toast {
-                Some((_, until)) => next_tick.min(*until),
-                None => next_tick,
-            };
+            let wake = [self.toast.as_ref().map(|(_, until)| *until), self.width_due]
+                .into_iter()
+                .flatten()
+                .fold(next_tick, Instant::min);
             let first = match self
                 .rx
                 .recv_timeout(wake.saturating_duration_since(Instant::now()))
@@ -279,12 +337,25 @@ impl<'a> App<'a> {
                             return Ok(());
                         }
                     }
+                    AppEvent::Resized => self.layout_changed(),
                     AppEvent::Redraw => {}
                     AppEvent::Files(Change::Task(id)) => {
                         changed.insert(id);
                     }
                     AppEvent::Files(Change::Rescan) => rescan = true,
                     AppEvent::Herdr(event) => {
+                        let ours = match &event {
+                            HerdrEvent::LayoutUpdated(layout) => layout
+                                .panes
+                                .iter()
+                                .any(|p| p.pane_id == self.context.pane_id),
+                            // After a reconnect, layout changes may have been missed.
+                            HerdrEvent::Resync(_) => true,
+                            _ => false,
+                        };
+                        if ours {
+                            self.layout_changed();
+                        }
                         let applied = self.deck.apply_herdr(self.herdr, event, Instant::now());
                         self.note(applied);
                     }

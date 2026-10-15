@@ -156,6 +156,33 @@ pub struct Layout {
     pub splits: Vec<LayoutSplit>,
 }
 
+/// One node of a tab's split tree, from `layout.export`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LayoutNode {
+    Pane {
+        #[serde(default)]
+        pane_id: Option<String>,
+    },
+    /// `ratio` is `first`'s share, which herdr keeps within 0.1..=0.9.
+    Split {
+        direction: SplitDirection,
+        ratio: f32,
+        first: Box<LayoutNode>,
+        second: Box<LayoutNode>,
+    },
+}
+
+/// A tab's split tree. Paths into it, as `layout.set_split_ratio` takes them, pick `second` with
+/// `true` and `first` with `false` at each split.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct LayoutTree {
+    pub tab_id: String,
+    #[serde(default)]
+    pub zoomed: bool,
+    pub root: LayoutNode,
+}
+
 /// herdr's whole live session, from `session.snapshot`.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Snapshot {
