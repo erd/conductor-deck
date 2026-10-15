@@ -94,6 +94,16 @@ impl CardModel {
     pub fn elapsed(&self, now: Timestamp) -> SignedDuration {
         now.duration_since(self.since)
     }
+
+    /// The herdr pane the worker runs in: from its latest `session_start`, else `task.json`.
+    pub fn pane(&self) -> Option<&str> {
+        (self.live.herdr_pane_id.as_deref()).or(self.task.herdr_pane_id.as_deref())
+    }
+
+    /// The task's PR: from `task.json`, else the worker's latest report.
+    pub fn pr_url(&self) -> Option<&str> {
+        self.task.pr_url.as_deref().or(self.live.pr_url.as_deref())
+    }
 }
 
 /// Needs attention first, then awaiting merge, working, and the rest; the longest in its

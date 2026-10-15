@@ -1,20 +1,23 @@
 //! The deck's screen: a header with counts, the stacked cards, and a footer with key hints.
 
 mod card;
+mod input;
 mod list;
 
 use conductor_state::Phase;
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use jiff::Timestamp;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::Stylize as _;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget as _, Wrap};
+use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 use crate::deck::CardModel;
 use crate::deck::card::Group;
+pub use input::{Input, Outcome as InputOutcome};
 pub use list::Selection;
 
 #[derive(Clone, Copy)]
@@ -26,6 +29,10 @@ pub struct View<'a> {
     pub now: Timestamp,
     /// Whether torn-down and abandoned tasks are shown.
     pub show_hidden: bool,
+    /// A transient message above the footer.
+    pub toast: Option<&'a str>,
+    /// The message being typed, which replaces the footer while `m` is open.
+    pub input: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -50,6 +57,16 @@ pub enum Action {
     Up,
     Down,
     ToggleHidden,
+    /// Jump to the selected card's worker.
+    Focus,
+    /// Type a message to the selected card's worker.
+    Message,
+    OpenPr,
+    FocusConductor,
+    /// A left click on screen row `row`.
+    Click {
+        row: u16,
+    },
 }
 
 pub fn draw(frame: &mut Frame, view: &View, selection: &mut Selection) {
@@ -57,13 +74,23 @@ pub fn draw(frame: &mut Frame, view: &View, selection: &mut Selection) {
         Body::Cards { problem, .. } => problem,
         Body::NoConductor { .. } | Body::HerdrUnreachable { .. } => None,
     };
-    let [header, body, problem_area, footer] = Layout::vertical([
+    let toast = view.toast.map(|text| {
+        Paragraph::new(text.to_owned())
+            .yellow()
+            .wrap(Wrap { trim: true })
+    });
+    let toast_height = toast.as_ref().map_or(0, |toast| {
+        u16::try_from(toast.line_count(frame.area().width)).unwrap_or(u16::MAX)
+    });
+    let [header, body, problem_area, toast_area, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(u16::from(problem.is_some())),
+        Constraint::Length(toast_height),
         Constraint::Length(1),
     ])
     .areas(frame.area());
+    selection.clear_drawn();
     let buf = frame.buffer_mut();
     draw_header(view, header, buf);
     let position = match view.body {
@@ -89,7 +116,16 @@ pub fn draw(frame: &mut Frame, view: &View, selection: &mut Selection) {
         let line = card::fit(vec![Span::raw(text)], usize::from(problem_area.width));
         line.red().render(problem_area, buf);
     }
-    draw_footer(view, position, footer, buf);
+    if let Some(toast) = toast {
+        toast.render(toast_area, buf);
+    }
+    match view.input {
+        Some(text) => {
+            let cursor = draw_input(text, footer, buf);
+            frame.set_cursor_position(cursor);
+        }
+        None => draw_footer(view, position, footer, buf),
+    }
 }
 
 /// The repo name on the left and, with cards, how many need attention, are working, and are
@@ -164,18 +200,40 @@ fn draw_cards(
         let height = heights[index].min(area.bottom() - y);
         let rect = Rect { y, height, ..area };
         card::render(&cards[index], now, index == selected, rect, buf);
+        selection.drew(y..y + height, index);
         y += height;
     }
     Some(selected)
 }
 
+/// The input line: a prompt and as much of the end of `text` as fits. Returns where the
+/// cursor goes.
+fn draw_input(text: &str, area: Rect, buf: &mut Buffer) -> Position {
+    const PROMPT: &str = "› ";
+    // Leave a column for the cursor after the text.
+    let room = usize::from(area.width).saturating_sub(PROMPT.width() + 1);
+    let mut width = 0;
+    let start = text
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| {
+            width += c.width().unwrap_or(0);
+            width <= room
+        })
+        .last()
+        .map_or(text.len(), |(index, _)| index);
+    let shown = &text[start..];
+    let line = Line::from(vec![Span::raw(PROMPT).bold(), Span::raw(shown.to_owned())]);
+    let cursor_x = u16::try_from(line.width()).unwrap_or(u16::MAX);
+    line.render(area, buf);
+    Position::new(
+        (area.x + cursor_x).min(area.right().saturating_sub(1)),
+        area.y,
+    )
+}
+
 /// Key hints on the left; the selection's position on the right.
 fn draw_footer(view: &View, position: Option<usize>, area: Rect, buf: &mut Buffer) {
-    let hints = match view.body {
-        Body::Cards { .. } if view.show_hidden => "j/k move · L hide done · q quit",
-        Body::Cards { .. } => "j/k move · L show all · q quit",
-        Body::NoConductor { .. } | Body::HerdrUnreachable { .. } => "q quit",
-    };
     let position = match (position, view.body) {
         (Some(index), Body::Cards { cards, .. }) => format!("{}/{}", index + 1, cards.len()),
         _ => String::new(),
@@ -187,10 +245,40 @@ fn draw_footer(view: &View, position: Option<usize>, area: Rect, buf: &mut Buffe
         Constraint::Length(position_width),
     ])
     .areas(area);
+    let hints = match view.body {
+        Body::Cards { .. } => card_hints(view.show_hidden, usize::from(left.width)),
+        Body::NoConductor { .. } | Body::HerdrUnreachable { .. } => "q quit".to_owned(),
+    };
     card::fit(vec![Span::raw(hints)], usize::from(left.width))
         .dim()
         .render(left, buf);
     Line::from(position).dim().render(right, buf);
+}
+
+/// As many key hints as fit in `width`, most useful first, always ending with `q quit`.
+fn card_hints(show_hidden: bool, width: usize) -> String {
+    const QUIT: &str = "q quit";
+    let toggle = if show_hidden {
+        "L hide done"
+    } else {
+        "L show all"
+    };
+    let mut hints = String::new();
+    for hint in [
+        "⏎ focus",
+        "m msg",
+        "o PR",
+        "c conductor",
+        toggle,
+        "j/k move",
+    ] {
+        let wider = format!("{hints}{hint} · ");
+        if wider.width() + QUIT.len() > width {
+            break;
+        }
+        hints = wider;
+    }
+    hints + QUIT
 }
 
 /// Maps input to an action. Raw mode delivers Ctrl-C as a key event rather than SIGINT, so it
@@ -205,11 +293,16 @@ pub fn action(event: &Event) -> Option<Action> {
             KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
             KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
             KeyCode::Char('L') => Some(Action::ToggleHidden),
+            KeyCode::Enter => Some(Action::Focus),
+            KeyCode::Char('m') => Some(Action::Message),
+            KeyCode::Char('o') => Some(Action::OpenPr),
+            KeyCode::Char('c') => Some(Action::FocusConductor),
             _ => None,
         },
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollDown => Some(Action::Down),
             MouseEventKind::ScrollUp => Some(Action::Up),
+            MouseEventKind::Down(MouseButton::Left) => Some(Action::Click { row: mouse.row }),
             _ => None,
         },
         _ => None,
@@ -243,6 +336,8 @@ mod tests {
             body: Body::Cards { cards, problem },
             now: ts(NOW),
             show_hidden: false,
+            toast: None,
+            input: None,
         }
     }
 
@@ -389,6 +484,8 @@ mod tests {
             },
             now: ts(NOW),
             show_hidden: false,
+            toast: None,
+            input: None,
         };
         let unreachable = View {
             body: Body::HerdrUnreachable {
@@ -457,6 +554,59 @@ mod tests {
         assert_eq!(buffer[(1, 2)].fg, Color::Red);
     }
 
+    #[test]
+    fn toast_wraps_above_the_input_line() {
+        let cards = every_phase();
+        let input = "rebase onto main first, then rerun the integration tests";
+        let view = View {
+            toast: Some("worker is waiting on a prompt; press Enter to focus it"),
+            input: Some(input),
+            ..cards_view(&cards[..2], None)
+        };
+        for width in [40, 60] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 14)).unwrap();
+            terminal
+                .draw(|frame| draw(frame, &view, &mut Selection::default()))
+                .unwrap();
+            // The cursor sits just after the text, or at the edge once it scrolls.
+            let after_text = u16::try_from(2 + input.len()).unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            assert_eq!(cursor, Position::new(after_text.min(width - 1), 13));
+            assert_snapshot!(
+                format!("toast_and_input_{width}"),
+                terminal.backend().clone()
+            );
+        }
+        let short = View {
+            input: Some("hi"),
+            ..view
+        };
+        let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &short, &mut Selection::default()))
+            .unwrap();
+        assert_eq!(
+            terminal.get_cursor_position().unwrap(),
+            Position::new(4, 13)
+        );
+    }
+
+    #[test]
+    fn records_where_each_card_was_drawn() {
+        let cards = every_phase();
+        let mut selection = Selection::default();
+        render(40, 12, &cards_view(&cards, None), &mut selection);
+        // The header is row 0; the first two cards take five rows each.
+        assert_eq!(selection.card_at(0), None);
+        assert_eq!(selection.card_at(1), Some(0));
+        assert_eq!(selection.card_at(5), Some(0));
+        assert_eq!(selection.card_at(6), Some(1));
+        assert_eq!(selection.card_at(11), None);
+
+        render(40, 12, &cards_view(&[], None), &mut selection);
+        assert_eq!(selection.card_at(1), None);
+    }
+
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(code, modifiers))
     }
@@ -465,7 +615,7 @@ mod tests {
         Event::Mouse(MouseEvent {
             kind,
             column: 0,
-            row: 0,
+            row: 7,
             modifiers: KeyModifiers::NONE,
         })
     }
@@ -479,8 +629,11 @@ mod tests {
                 key(KeyCode::Char('c'), KeyModifiers::CONTROL),
                 Some(Action::Quit),
             ),
-            (key(KeyCode::Char('c'), none), None),
-            (key(KeyCode::Enter, none), None),
+            (key(KeyCode::Char('c'), none), Some(Action::FocusConductor)),
+            (key(KeyCode::Enter, none), Some(Action::Focus)),
+            (key(KeyCode::Char('m'), none), Some(Action::Message)),
+            (key(KeyCode::Char('o'), none), Some(Action::OpenPr)),
+            (key(KeyCode::Char('x'), none), None),
             (key(KeyCode::Char('j'), none), Some(Action::Down)),
             (key(KeyCode::Down, none), Some(Action::Down)),
             (key(KeyCode::Char('k'), none), Some(Action::Up)),
@@ -492,6 +645,11 @@ mod tests {
             (mouse(MouseEventKind::ScrollDown), Some(Action::Down)),
             (mouse(MouseEventKind::ScrollUp), Some(Action::Up)),
             (mouse(MouseEventKind::Moved), None),
+            (
+                mouse(MouseEventKind::Down(MouseButton::Left)),
+                Some(Action::Click { row: 7 }),
+            ),
+            (mouse(MouseEventKind::Down(MouseButton::Right)), None),
         ];
         for (event, expected) in cases {
             assert_eq!(action(&event), expected, "{event:?}");

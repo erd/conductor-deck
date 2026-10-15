@@ -35,6 +35,10 @@ The UI snapshot tests use [insta](https://insta.rs). After a deliberate change t
 | Key | Does |
 | --- | --- |
 | `j`/`k`, `↓`/`↑`, mouse wheel | Move the selection |
+| `Enter`, click | Jump to the card's worker |
+| `m` | Message the card's worker: type a line, `Enter` sends, `Esc` cancels |
+| `o` | Open the card's PR in the browser |
+| `c` | Jump to the conductor |
 | `L` | Show or hide torn-down and abandoned tasks |
 | `q`, Ctrl-C | Close the deck |
 

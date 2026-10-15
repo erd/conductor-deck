@@ -10,6 +10,8 @@ pub struct Selection {
     index: usize,
     /// The first card in view.
     offset: usize,
+    /// The rows each card took when last drawn, by index, for mouse clicks.
+    drawn: Vec<(Range<u16>, usize)>,
 }
 
 impl Selection {
@@ -62,6 +64,31 @@ impl Selection {
         }
         // A card taller than the whole view still shows, cut off.
         self.offset..end.max(self.offset + 1)
+    }
+
+    /// Selects the card at `index` in `ids`, if there is one.
+    pub fn select_index(&mut self, ids: &[&str], index: usize) {
+        if index < ids.len() {
+            self.select(ids, index);
+        }
+    }
+
+    /// Notes the rows card `index` was drawn on in this frame.
+    pub fn drew(&mut self, rows: Range<u16>, index: usize) {
+        self.drawn.push((rows, index));
+    }
+
+    /// Forgets the cards drawn before, at the start of a frame.
+    pub fn clear_drawn(&mut self) {
+        self.drawn.clear();
+    }
+
+    /// The card drawn on screen row `row` in the last frame.
+    pub fn card_at(&self, row: u16) -> Option<usize> {
+        self.drawn
+            .iter()
+            .find(|(rows, _)| rows.contains(&row))
+            .map(|&(_, index)| index)
     }
 
     fn select(&mut self, ids: &[&str], index: usize) {
@@ -131,6 +158,23 @@ mod tests {
         selection.move_by(&IDS[..4], 3);
         assert_eq!(selection.scroll(&heights, 10), 2..4);
         assert_eq!(selection.scroll(&heights, 20), 0..4);
+    }
+
+    #[test]
+    fn finds_the_card_under_a_row_and_selects_it() {
+        let mut selection = Selection::default();
+        selection.drew(1..6, 3);
+        selection.drew(6..12, 4);
+        assert_eq!(selection.card_at(0), None);
+        assert_eq!(selection.card_at(5), Some(3));
+        assert_eq!(selection.card_at(6), Some(4));
+        assert_eq!(selection.card_at(12), None);
+        selection.select_index(&IDS, 4);
+        assert_eq!(selection.resolve(&IDS), Some(4));
+        selection.select_index(&IDS, 9);
+        assert_eq!(selection.resolve(&IDS), Some(4));
+        selection.clear_drawn();
+        assert_eq!(selection.card_at(5), None);
     }
 
     #[test]

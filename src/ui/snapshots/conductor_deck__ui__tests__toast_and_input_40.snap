@@ -1,0 +1,18 @@
+---
+source: src/ui/mod.rs
+expression: terminal.backend().clone()
+---
+"web                             !2 ●0 ⇡0"
+"┏ failed-09 ━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
+"┃✗ Migrate the queue                   ┃"
+"┃failed                           1h34m┃"
+"┃ctx – · conductor/failed-09           ┃"
+"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+"┌ db-choice-04 ────────────────────────┐"
+"│? Pick a database                     │"
+"│waiting on decision: auth-flow  32m55s│"
+"│ctx – · conductor/db-choice-04        │"
+"└──────────────────────────────────────┘"
+"worker is waiting on a prompt; press    "
+"Enter to focus it                       "
+"› rst, then rerun the integration tests "

@@ -10,6 +10,7 @@ use super::{HerdrClient, HerdrError, HerdrEvent, Result, Subscription};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Focus(String),
+    FocusTab(String),
     Prompt {
         pane: String,
         text: String,
@@ -26,6 +27,7 @@ pub struct FakeHerdr {
     pub snapshot: Mutex<Snapshot>,
     actions: Mutex<Vec<Action>>,
     blocked: Mutex<HashSet<String>>,
+    gone: Mutex<HashSet<String>>,
     subscribers: Mutex<Vec<Sender<HerdrEvent>>>,
 }
 
@@ -40,6 +42,7 @@ impl FakeHerdr {
             snapshot: Mutex::new(snapshot),
             actions: Mutex::default(),
             blocked: Mutex::default(),
+            gone: Mutex::default(),
             subscribers: Mutex::default(),
         }
     }
@@ -47,6 +50,12 @@ impl FakeHerdr {
     /// Makes prompts to `pane` fail with `AgentBlocked`, as herdr does for a blocked agent.
     pub fn block(&self, pane: &str) {
         lock(&self.blocked).insert(pane.to_owned());
+    }
+
+    /// Makes focusing or prompting `pane` fail with `NotFound`, as herdr does once the pane
+    /// has closed.
+    pub fn close(&self, pane: &str) {
+        lock(&self.gone).insert(pane.to_owned());
     }
 
     pub fn actions(&self) -> Vec<Action> {
@@ -60,6 +69,16 @@ impl FakeHerdr {
 
     fn record(&self, action: Action) {
         lock(&self.actions).push(action);
+    }
+
+    fn check_present(&self, pane: &str) -> Result<()> {
+        if lock(&self.gone).contains(pane) {
+            return Err(HerdrError::NotFound {
+                code: "pane_not_found".into(),
+                message: format!("pane {pane} not found"),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -85,11 +104,18 @@ impl HerdrClient for FakeHerdr {
     }
 
     fn agent_focus(&self, pane: &str) -> Result<()> {
+        self.check_present(pane)?;
         self.record(Action::Focus(pane.to_owned()));
         Ok(())
     }
 
+    fn tab_focus(&self, tab: &str) -> Result<()> {
+        self.record(Action::FocusTab(tab.to_owned()));
+        Ok(())
+    }
+
     fn agent_prompt(&self, pane: &str, text: &str) -> Result<()> {
+        self.check_present(pane)?;
         if lock(&self.blocked).contains(pane) {
             return Err(HerdrError::AgentBlocked(format!("agent {pane} is blocked")));
         }
@@ -136,17 +162,26 @@ mod tests {
     fn records_actions_and_refuses_blocked_prompts() {
         let herdr = fake();
         herdr.block("w1:p2");
+        herdr.close("w1:p3");
         herdr.agent_focus("w1:p1").unwrap();
+        herdr.tab_focus("w1:t1").unwrap();
         herdr.agent_prompt("w1:p1", "go").unwrap();
         assert!(matches!(
             herdr.agent_prompt("w1:p2", "go"),
             Err(HerdrError::AgentBlocked(_))
         ));
+        for result in [
+            herdr.agent_focus("w1:p3"),
+            herdr.agent_prompt("w1:p3", "go"),
+        ] {
+            assert!(matches!(result, Err(HerdrError::NotFound { .. })));
+        }
         herdr.set_split_ratio("w1:t1", &[true], 0.7).unwrap();
         assert_eq!(
             herdr.actions(),
             [
                 Action::Focus("w1:p1".into()),
+                Action::FocusTab("w1:t1".into()),
                 Action::Prompt {
                     pane: "w1:p1".into(),
                     text: "go".into()
