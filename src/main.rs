@@ -14,7 +14,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use conductor_state::Home;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEvent};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -27,7 +27,7 @@ use deck::Deck;
 use deck::watch::{Change, TaskWatcher};
 use herdr::{Forwarding, HerdrClient, HerdrError, HerdrEvent, SocketClient};
 use repo::Location;
-use ui::View;
+use ui::{Action, Body, Selection, View};
 
 type BoxError = Box<dyn std::error::Error>;
 
@@ -54,25 +54,50 @@ fn main() -> ExitCode {
 fn deck() -> Result<(), BoxError> {
     let herdr = SocketClient::from_env()?;
     let home = Home::resolve()?;
-    let location = repo::locate(&herdr, &home)?;
+    // A herdr that doesn't answer is shown in the pane rather than ending the deck unseen.
+    let location = repo::locate(&herdr, &home);
     install_panic_hook();
     let _guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let (tx, rx) = mpsc::channel();
     spawn_input(tx.clone())?;
     match location {
-        Location::Repo { repo_id } => {
+        Ok(Location::Repo { repo_id, name }) => {
             let deck = Deck::open(home, repo_id)?;
-            App::new(&herdr, deck, tx, rx)?.run(&mut terminal)
+            App::new(&herdr, deck, name, tx, rx)?.run(&mut terminal)
         }
-        Location::NoConductor { reason } => loop {
-            terminal.draw(|frame| ui::draw(frame, &View::NoConductor { reason: &reason }))?;
-            match rx.recv() {
-                Ok(AppEvent::Key(key)) if ui::is_quit(&key) => return Ok(()),
-                Ok(_) => {}
-                Err(_) => return Ok(()),
+        Ok(Location::NoConductor { reason }) => {
+            show_until_quit(&mut terminal, &rx, Body::NoConductor { reason: &reason })
+        }
+        Err(err) => {
+            let error = err.to_string();
+            show_until_quit(&mut terminal, &rx, Body::HerdrUnreachable { error: &error })
+        }
+    }
+}
+
+/// Shows a screen with nothing to update until the user quits.
+fn show_until_quit(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    rx: &mpsc::Receiver<AppEvent>,
+    body: Body,
+) -> Result<(), BoxError> {
+    let mut selection = Selection::default();
+    loop {
+        let view = View {
+            repo: None,
+            body,
+            now: Timestamp::now(),
+            show_hidden: false,
+        };
+        terminal.draw(|frame| ui::draw(frame, &view, &mut selection))?;
+        match rx.recv() {
+            Ok(AppEvent::Input(event)) if ui::action(&event) == Some(Action::Quit) => {
+                return Ok(());
             }
-        },
+            Ok(_) => {}
+            Err(_) => return Ok(()),
+        }
     }
 }
 
@@ -109,7 +134,8 @@ fn probe(herdr: &impl HerdrClient) -> herdr::Result<()> {
 
 /// Everything the deck's loop waits on, merged into one channel.
 enum AppEvent {
-    Key(KeyEvent),
+    /// A key press or mouse event.
+    Input(Event),
     /// A resize or other terminal event that only needs a redraw.
     Redraw,
     Files(Change),
@@ -122,7 +148,7 @@ fn spawn_input(tx: Sender<AppEvent>) -> io::Result<()> {
         .spawn(move || {
             while let Ok(event) = event::read() {
                 let event = match event {
-                    Event::Key(key) => AppEvent::Key(key),
+                    Event::Key(_) | Event::Mouse(_) => AppEvent::Input(event),
                     _ => AppEvent::Redraw,
                 };
                 if tx.send(event).is_err() {
@@ -136,6 +162,9 @@ fn spawn_input(tx: Sender<AppEvent>) -> io::Result<()> {
 struct App<'a> {
     herdr: &'a SocketClient,
     deck: Deck,
+    /// The repo's name, for the header.
+    repo: String,
+    selection: Selection,
     tx: Sender<AppEvent>,
     rx: mpsc::Receiver<AppEvent>,
     _watcher: TaskWatcher,
@@ -149,6 +178,7 @@ impl<'a> App<'a> {
     fn new(
         herdr: &'a SocketClient,
         deck: Deck,
+        repo: String,
         tx: Sender<AppEvent>,
         rx: mpsc::Receiver<AppEvent>,
     ) -> Result<Self, BoxError> {
@@ -159,6 +189,8 @@ impl<'a> App<'a> {
         Ok(Self {
             herdr,
             deck,
+            repo,
+            selection: Selection::default(),
             tx,
             rx,
             _watcher: watcher,
@@ -180,11 +212,17 @@ impl<'a> App<'a> {
             let cards = self.deck.cards();
             let task_error =
                 (self.deck.errors().iter().next()).map(|(id, err)| format!("task {id}: {err}"));
-            let view = View::Cards {
-                cards: &cards,
-                problem: self.problem.as_deref().or(task_error.as_deref()),
+            let view = View {
+                repo: Some(&self.repo),
+                body: Body::Cards {
+                    cards: &cards,
+                    problem: self.problem.as_deref().or(task_error.as_deref()),
+                },
+                now: self.deck.now(),
+                show_hidden: self.deck.show_hidden,
             };
-            terminal.draw(|frame| ui::draw(frame, &view))?;
+            terminal.draw(|frame| ui::draw(frame, &view, &mut self.selection))?;
+            let ids: Vec<&str> = cards.iter().map(|card| card.task.id.as_str()).collect();
 
             let first = match self
                 .rx
@@ -200,8 +238,16 @@ impl<'a> App<'a> {
             let pending: Vec<_> = first.into_iter().chain(self.rx.try_iter()).collect();
             for event in pending {
                 match event {
-                    AppEvent::Key(key) if ui::is_quit(&key) => return Ok(()),
-                    AppEvent::Key(_) | AppEvent::Redraw => {}
+                    AppEvent::Input(event) => match ui::action(&event) {
+                        Some(Action::Quit) => return Ok(()),
+                        Some(Action::Up) => self.selection.move_by(&ids, -1),
+                        Some(Action::Down) => self.selection.move_by(&ids, 1),
+                        Some(Action::ToggleHidden) => {
+                            self.deck.show_hidden = !self.deck.show_hidden;
+                        }
+                        None => {}
+                    },
+                    AppEvent::Redraw => {}
                     AppEvent::Files(Change::Task(id)) => {
                         changed.insert(id);
                     }

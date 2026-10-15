@@ -91,10 +91,6 @@ impl CardModel {
     }
 
     /// Time in the current state as of `now`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "elapsed times are rendered by #4")
-    )]
     pub fn elapsed(&self, now: Timestamp) -> SignedDuration {
         now.duration_since(self.since)
     }
