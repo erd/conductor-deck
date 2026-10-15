@@ -49,6 +49,7 @@ pub struct CardModel {
     pub task: Task,
     pub live: LiveStatus,
     pub agent: Option<AgentInfo>,
+    /// Oldest first.
     pub open_decisions: Vec<Decision>,
     /// Empty unless `group` is [`Group::NeedsAttention`].
     pub attention: Vec<Attention>,
@@ -79,11 +80,13 @@ impl CardModel {
             Group::Working | Group::Other => state.live.since,
         }
         .unwrap_or(state.task.updated_at);
+        let mut open_decisions = state.open_decisions.clone();
+        open_decisions.sort_by_cached_key(|d| (state.decision_opened(&d.key), d.key.clone()));
         Self {
             task: state.task.clone(),
             live: state.live.clone(),
             agent: agent.cloned(),
-            open_decisions: state.open_decisions.clone(),
+            open_decisions,
             attention,
             group,
             since,
@@ -235,6 +238,20 @@ mod tests {
         assert_eq!(card.attention, [Attention::Decision, Attention::Blocked]);
         // auth-flow opened at 12:02:01; db-engine (12:02:00) was answered.
         assert_eq!(card.since, ts("12:02:01"));
+    }
+
+    #[test]
+    fn open_decisions_oldest_first() {
+        let repo = TempRepo::new();
+        let open = |time, key| event(time, &format!(r#""kind":"decision_open","key":"{key}""#));
+        let lines = [open("12:00:00", "zeta"), open("12:01:00", "alpha")];
+        repo.add_task("t", Phase::NeedsDecision, &lines);
+        repo.add_decision("t", "alpha");
+        repo.add_decision("t", "zeta");
+        let state = TaskState::load(&repo.task_dir("t")).unwrap().unwrap();
+        let card = CardModel::new(&state, None);
+        let keys: Vec<_> = card.open_decisions.iter().map(|d| d.key.as_str()).collect();
+        assert_eq!(keys, ["zeta", "alpha"]);
     }
 
     #[test]

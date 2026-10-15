@@ -1,15 +1,17 @@
 //! What the deck's keys do to a card, the conductor, or the browser. Each action returns the
 //! toast to show, if any.
 
+use std::ffi::OsString;
 use std::io;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
 
 use conductor_state::read_repo_record;
 
 use crate::deck::CardModel;
 use crate::herdr::types::{AgentStatus, PluginContext};
 use crate::herdr::{HerdrClient, HerdrError};
+use crate::ui::{Answer, DecisionModal};
 
 const BLOCKED: &str = "worker is waiting on a prompt; press Enter to focus it";
 
@@ -60,6 +62,89 @@ pub fn send_message(
         Err(HerdrError::NotFound { .. }) => gone(task_id),
         Err(err) => format!("message failed: {err}"),
     })
+}
+
+/// The modal for the card's open decisions, oldest first; else the toast saying there are none.
+pub fn start_decision(card: &CardModel) -> Result<DecisionModal, String> {
+    DecisionModal::new(
+        card.task.id.clone(),
+        card.pane().map(ToOwned::to_owned),
+        card.open_decisions.clone(),
+    )
+    .ok_or_else(|| format!("{}: no open decisions", card.task.id))
+}
+
+/// Records `answer` by running the conductor CLI at `bin` with `run`, since only the CLI writes
+/// conductor state, then tells the worker in `pane`. The worker is told only once the answer is
+/// recorded; if it can't be told, the answer stands and the toast says so.
+pub fn answer_decision(
+    herdr: &impl HerdrClient,
+    run: impl FnOnce(&Path, &[String]) -> io::Result<Output>,
+    bin: &Path,
+    repo_id: &str,
+    task_id: &str,
+    pane: Option<&str>,
+    answer: &Answer,
+) -> String {
+    let mut args = vec![
+        "decision".to_owned(),
+        "answer".to_owned(),
+        answer.key.clone(),
+        answer.value.clone(),
+    ];
+    if let Some(note) = &answer.note {
+        args.extend(["--note".to_owned(), note.clone()]);
+    }
+    args.extend(["--by", "deck", "--task", task_id, "--repo", repo_id].map(ToOwned::to_owned));
+    match run(bin, &args) {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let reason = stderr.lines().rfind(|line| !line.trim().is_empty());
+            return match reason {
+                Some(reason) => format!("answer failed: {}", reason.trim()),
+                None => format!("answer failed: conductor exited with {}", output.status),
+            };
+        }
+        Err(err) => return format!("couldn't run {}: {err}", bin.display()),
+    }
+    let key = &answer.key;
+    let Some(pane) = pane else {
+        return format!("answered {key}; {}", gone(task_id));
+    };
+    let prompt = format!(
+        "Decision {key} answered: {}. Check `conductor decision list` and continue.",
+        answer.label
+    );
+    match herdr.agent_prompt(pane, &prompt) {
+        Ok(()) => format!("answered {key} for {task_id}"),
+        Err(HerdrError::AgentBlocked(_)) => {
+            format!("answered {key}; worker is waiting on a prompt, so it wasn't told")
+        }
+        Err(HerdrError::NotFound { .. }) => format!("answered {key}; {}", gone(task_id)),
+        Err(err) => format!("answered {key}, but couldn't tell the worker: {err}"),
+    }
+}
+
+/// The conductor CLI: `CONDUCTOR_BIN` if set, else `~/.cargo/bin/conductor`. Plugin panes start
+/// with a minimal `PATH`, so it isn't looked up there.
+pub fn conductor_bin() -> Option<PathBuf> {
+    conductor_bin_from(std::env::var_os("CONDUCTOR_BIN"), std::env::var_os("HOME"))
+}
+
+fn conductor_bin_from(bin: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    match bin.filter(|bin| !bin.is_empty()) {
+        Some(bin) => Some(bin.into()),
+        None => home
+            .filter(|home| !home.is_empty())
+            .map(|home| Path::new(&home).join(".cargo/bin/conductor")),
+    }
+}
+
+/// Runs `bin` with `args` to completion. Its output is captured, since it would draw over the
+/// deck.
+pub fn run_conductor(bin: &Path, args: &[String]) -> io::Result<Output> {
+    Command::new(bin).args(args).stdin(Stdio::null()).output()
 }
 
 /// Opens the card's PR with `launch`. Only web URLs are opened: the URL comes from what a
@@ -138,11 +223,13 @@ pub fn focus_conductor(
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::ExitStatus;
 
     use conductor_state::{Phase, RepoRecord, SchemaV1, write_repo_record_atomic};
 
     use super::*;
-    use crate::deck::testing::{REPO_ID, TempRepo, task};
+    use crate::deck::testing::{REPO_ID, TempRepo, decision, task};
     use crate::deck::{AgentInfo, Deck};
     use crate::herdr::fake::{Action, FakeHerdr};
     use crate::herdr::types::Snapshot;
@@ -241,6 +328,166 @@ mod tests {
             Some(GONE)
         );
         assert_eq!(herdr.actions(), []);
+    }
+
+    fn answer(note: Option<&str>) -> Answer {
+        Answer {
+            key: "db-engine".into(),
+            value: "sqlite".into(),
+            label: "SQLite".into(),
+            note: note.map(Into::into),
+        }
+    }
+
+    /// A runner that records each run and exits with `code`, printing `stderr`.
+    fn runner<'a>(
+        runs: &'a RefCell<Vec<(PathBuf, Vec<String>)>>,
+        code: i32,
+        stderr: &'a str,
+    ) -> impl FnOnce(&Path, &[String]) -> io::Result<Output> + 'a {
+        move |bin, args| {
+            runs.borrow_mut().push((bin.to_owned(), args.to_vec()));
+            Ok(Output {
+                status: ExitStatus::from_raw(code << 8),
+                stdout: Vec::new(),
+                stderr: stderr.as_bytes().to_vec(),
+            })
+        }
+    }
+
+    const BIN: &str = "/home/u/.cargo/bin/conductor";
+    const PROMPT: &str =
+        "Decision db-engine answered: SQLite. Check `conductor decision list` and continue.";
+
+    fn answer_with(
+        herdr: &FakeHerdr,
+        run: impl FnOnce(&Path, &[String]) -> io::Result<Output>,
+        pane: Option<&str>,
+        answer: &Answer,
+    ) -> String {
+        answer_decision(herdr, run, Path::new(BIN), REPO_ID, "t", pane, answer)
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|&arg| arg.to_owned()).collect()
+    }
+
+    #[test]
+    fn answering_runs_the_cli_then_prompts_the_worker() {
+        let herdr = fake(None);
+        let runs = RefCell::new(Vec::new());
+        let note = answer(Some("tests run on it"));
+        assert_eq!(
+            answer_with(&herdr, runner(&runs, 0, ""), Some("w2:p1"), &note),
+            "answered db-engine for t"
+        );
+        assert_eq!(
+            answer_with(&herdr, runner(&runs, 0, ""), Some("w2:p1"), &answer(None)),
+            "answered db-engine for t"
+        );
+        let common = ["--by", "deck", "--task", "t", "--repo", REPO_ID];
+        let with_note = [
+            &[
+                "decision",
+                "answer",
+                "db-engine",
+                "sqlite",
+                "--note",
+                "tests run on it",
+            ][..],
+            &common,
+        ]
+        .concat();
+        let without = [&["decision", "answer", "db-engine", "sqlite"][..], &common].concat();
+        assert_eq!(
+            *runs.borrow(),
+            [
+                (PathBuf::from(BIN), strings(&with_note)),
+                (PathBuf::from(BIN), strings(&without)),
+            ]
+        );
+        let prompt = Action::Prompt {
+            pane: "w2:p1".into(),
+            text: PROMPT.into(),
+        };
+        assert_eq!(herdr.actions(), [prompt.clone(), prompt]);
+    }
+
+    #[test]
+    fn a_failed_answer_tells_the_worker_nothing() {
+        let herdr = fake(None);
+        let runs = RefCell::new(Vec::new());
+        let stderr = "Error: decision `db-engine` was already answered: `pg` by user\n\n";
+        assert_eq!(
+            answer_with(
+                &herdr,
+                runner(&runs, 1, stderr),
+                Some("w2:p1"),
+                &answer(None)
+            ),
+            "answer failed: Error: decision `db-engine` was already answered: `pg` by user"
+        );
+        let silent = answer_with(&herdr, runner(&runs, 2, ""), Some("w2:p1"), &answer(None));
+        assert!(
+            silent.starts_with("answer failed: conductor exited with"),
+            "{silent}"
+        );
+        let missing = |_: &Path, _: &[String]| Err(io::Error::from(io::ErrorKind::NotFound));
+        let toast = answer_with(&herdr, missing, Some("w2:p1"), &answer(None));
+        assert!(
+            toast.starts_with(&format!("couldn't run {BIN}: ")),
+            "{toast}"
+        );
+        assert_eq!(herdr.actions(), []);
+    }
+
+    #[test]
+    fn the_answer_stands_when_the_worker_cant_be_told() {
+        let herdr = fake(None);
+        herdr.block("w2:p1");
+        herdr.close("w2:p2");
+        let runs = RefCell::new(Vec::new());
+        let cases = [
+            (
+                Some("w2:p1"),
+                "answered db-engine; worker is waiting on a prompt, so it wasn't told",
+            ),
+            (Some("w2:p2"), &*format!("answered db-engine; {GONE}")),
+            (None, &*format!("answered db-engine; {GONE}")),
+        ];
+        for (pane, toast) in cases {
+            assert_eq!(
+                answer_with(&herdr, runner(&runs, 0, ""), pane, &answer(None)),
+                toast
+            );
+        }
+        assert_eq!(runs.borrow().len(), 3);
+        assert_eq!(herdr.actions(), []);
+    }
+
+    #[test]
+    fn deciding_needs_an_open_decision() {
+        assert_eq!(
+            start_decision(&card(Some("w2:p1"), None)).unwrap_err(),
+            "t: no open decisions"
+        );
+        let mut card = card(Some("w2:p1"), None);
+        card.open_decisions = vec![decision("db-engine", &[("pg", "Postgres", None)])];
+        let modal = start_decision(&card).unwrap();
+        assert_eq!((modal.task_id(), modal.pane()), ("t", Some("w2:p1")));
+    }
+
+    #[test]
+    fn finds_the_conductor_cli() {
+        let os = |s: &str| Some(OsString::from(s));
+        assert_eq!(
+            conductor_bin_from(os("/opt/conductor"), os("/home/u")),
+            Some("/opt/conductor".into())
+        );
+        assert_eq!(conductor_bin_from(os(""), os("/home/u")), Some(BIN.into()));
+        assert_eq!(conductor_bin_from(None, os("/home/u")), Some(BIN.into()));
+        assert_eq!(conductor_bin_from(None, None), None);
+        assert_eq!(conductor_bin_from(None, os("")), None);
     }
 
     #[test]

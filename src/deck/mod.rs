@@ -98,6 +98,10 @@ impl Deck {
         }
     }
 
+    pub fn repo_id(&self) -> &str {
+        &self.repo_id
+    }
+
     pub fn repo_dir(&self) -> std::path::PathBuf {
         self.home.repo_dir(&self.repo_id)
     }

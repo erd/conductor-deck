@@ -1,6 +1,7 @@
 //! The deck's screen: a header with counts, the stacked cards, and a footer with key hints.
 
 mod card;
+mod decision;
 mod input;
 mod list;
 
@@ -17,6 +18,7 @@ use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 use crate::deck::CardModel;
 use crate::deck::card::Group;
+pub use decision::{Answer, DecisionModal, Outcome as DecisionOutcome};
 pub use input::{Input, Outcome as InputOutcome};
 pub use list::Selection;
 
@@ -33,6 +35,8 @@ pub struct View<'a> {
     pub toast: Option<&'a str>,
     /// The message being typed, which replaces the footer while `m` is open.
     pub input: Option<&'a str>,
+    /// The decision being answered, drawn over the cards while `d` is open.
+    pub decision: Option<&'a DecisionModal>,
 }
 
 #[derive(Clone, Copy)]
@@ -61,6 +65,8 @@ pub enum Action {
     Focus,
     /// Type a message to the selected card's worker.
     Message,
+    /// Answer the selected card's open decisions.
+    Decide,
     OpenPr,
     FocusConductor,
     /// A left click on screen row `row`.
@@ -111,6 +117,9 @@ pub fn draw(frame: &mut Frame, view: &View, selection: &mut Selection) {
         }
         Body::Cards { cards, .. } => draw_cards(cards, view.now, selection, body, buf),
     };
+    let modal_cursor = view
+        .decision
+        .and_then(|modal| decision::render(modal, body, buf));
     if let Some(problem) = problem {
         let text = format!("{} {problem}", card::ATTENTION);
         let line = card::fit(vec![Span::raw(text)], usize::from(problem_area.width));
@@ -119,12 +128,21 @@ pub fn draw(frame: &mut Frame, view: &View, selection: &mut Selection) {
     if let Some(toast) = toast {
         toast.render(toast_area, buf);
     }
-    match view.input {
-        Some(text) => {
-            let cursor = draw_input(text, footer, buf);
+    match (view.decision, view.input) {
+        (Some(modal), _) => {
+            let hints = decision_hints(modal);
+            card::fit(vec![Span::raw(hints)], usize::from(footer.width))
+                .dim()
+                .render(footer, buf);
+            if let Some(cursor) = modal_cursor {
+                frame.set_cursor_position(cursor);
+            }
+        }
+        (None, Some(text)) => {
+            let cursor = draw_input(Span::raw("› ").bold(), text, footer, buf);
             frame.set_cursor_position(cursor);
         }
-        None => draw_footer(view, position, footer, buf),
+        (None, None) => draw_footer(view, position, footer, buf),
     }
 }
 
@@ -206,12 +224,11 @@ fn draw_cards(
     Some(selected)
 }
 
-/// The input line: a prompt and as much of the end of `text` as fits. Returns where the
+/// An input line: `prompt` and as much of the end of `text` as fits. Returns where the
 /// cursor goes.
-fn draw_input(text: &str, area: Rect, buf: &mut Buffer) -> Position {
-    const PROMPT: &str = "› ";
+fn draw_input(prompt: Span<'_>, text: &str, area: Rect, buf: &mut Buffer) -> Position {
     // Leave a column for the cursor after the text.
-    let room = usize::from(area.width).saturating_sub(PROMPT.width() + 1);
+    let room = usize::from(area.width).saturating_sub(prompt.width() + 1);
     let mut width = 0;
     let start = text
         .char_indices()
@@ -223,7 +240,7 @@ fn draw_input(text: &str, area: Rect, buf: &mut Buffer) -> Position {
         .last()
         .map_or(text.len(), |(index, _)| index);
     let shown = &text[start..];
-    let line = Line::from(vec![Span::raw(PROMPT).bold(), Span::raw(shown.to_owned())]);
+    let line = Line::from(vec![card::owned(prompt), Span::raw(shown.to_owned())]);
     let cursor_x = u16::try_from(line.width()).unwrap_or(u16::MAX);
     line.render(area, buf);
     Position::new(
@@ -267,6 +284,7 @@ fn card_hints(show_hidden: bool, width: usize) -> String {
     for hint in [
         "⏎ focus",
         "m msg",
+        "d decide",
         "o PR",
         "c conductor",
         toggle,
@@ -279,6 +297,21 @@ fn card_hints(show_hidden: bool, width: usize) -> String {
         hints = wider;
     }
     hints + QUIT
+}
+
+/// The decision modal's keys, for the footer while it's open.
+fn decision_hints(modal: &DecisionModal) -> String {
+    let mut hints = vec!["⏎ answer"];
+    if modal.typing() {
+        hints.push("tab options");
+    } else {
+        hints.push("tab note");
+        if modal.several() {
+            hints.push("n/p next");
+        }
+    }
+    hints.push("esc cancel");
+    hints.join(" · ")
 }
 
 /// Maps input to an action. Raw mode delivers Ctrl-C as a key event rather than SIGINT, so it
@@ -295,6 +328,7 @@ pub fn action(event: &Event) -> Option<Action> {
             KeyCode::Char('L') => Some(Action::ToggleHidden),
             KeyCode::Enter => Some(Action::Focus),
             KeyCode::Char('m') => Some(Action::Message),
+            KeyCode::Char('d') => Some(Action::Decide),
             KeyCode::Char('o') => Some(Action::OpenPr),
             KeyCode::Char('c') => Some(Action::FocusConductor),
             _ => None,
@@ -318,7 +352,9 @@ mod tests {
     use ratatui::style::Color;
 
     use super::*;
-    use crate::deck::testing::{REPO_ID, TempRepo, event, fixture, task, ts};
+    use conductor_state::Decision;
+
+    use crate::deck::testing::{REPO_ID, TempRepo, decision, event, fixture, task, ts};
     use crate::deck::{AgentInfo, Deck};
     use crate::herdr::types::AgentStatus;
 
@@ -338,6 +374,7 @@ mod tests {
             show_hidden: false,
             toast: None,
             input: None,
+            decision: None,
         }
     }
 
@@ -486,6 +523,7 @@ mod tests {
             show_hidden: false,
             toast: None,
             input: None,
+            decision: None,
         };
         let unreachable = View {
             body: Body::HerdrUnreachable {
@@ -591,6 +629,73 @@ mod tests {
         );
     }
 
+    fn auth_flow() -> Decision {
+        let mut auth = decision(
+            "auth-flow",
+            &[
+                ("refresh", "Refresh tokens", Some("rotate on every request")),
+                ("sliding", "Sliding sessions", Some("extend on activity")),
+                ("relogin", "Force a new login", None),
+            ],
+        );
+        auth.title = "How should expired sessions recover?".into();
+        auth.about = "Sessions expire mid-checkout and the redirect loops.".into();
+        auth.recommend = Some("refresh".into());
+        auth
+    }
+
+    fn press(modal: &mut DecisionModal, code: KeyCode) {
+        modal.handle(&KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn decision_modal_with_a_note() {
+        let cards = every_phase();
+        let mut auth = auth_flow();
+        auth.allow_freeform = true;
+        let engine = decision("db-engine", &[("pg", "Postgres", None)]);
+        let mut modal =
+            DecisionModal::new("fix-login-07".into(), None, vec![auth, engine]).unwrap();
+        press(&mut modal, KeyCode::Down);
+        press(&mut modal, KeyCode::Tab);
+        for c in "keep it behind a flag".chars() {
+            press(&mut modal, KeyCode::Char(c));
+        }
+        let view = View {
+            decision: Some(&modal),
+            ..cards_view(&cards, None)
+        };
+        for width in [40, 60] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+            terminal
+                .draw(|frame| draw(frame, &view, &mut Selection::default()))
+                .unwrap();
+            // The note is the modal's last row, above its bottom border.
+            let note_x = u16::try_from(1 + "note › keep it behind a flag".width()).unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            assert_eq!(cursor.x, note_x.min(width - 2));
+            assert_eq!(terminal.backend().buffer()[(0, cursor.y + 1)].symbol(), "┗");
+            assert_snapshot!(
+                format!("decision_modal_with_a_note_{width}"),
+                terminal.backend().clone()
+            );
+        }
+    }
+
+    #[test]
+    fn decision_modal_choosing() {
+        let cards = every_phase();
+        let modal = DecisionModal::new("fix-login-07".into(), None, vec![auth_flow()]).unwrap();
+        let view = View {
+            decision: Some(&modal),
+            ..cards_view(&cards, None)
+        };
+        for width in [40, 60] {
+            let backend = render(width, 20, &view, &mut Selection::default());
+            assert_snapshot!(format!("decision_modal_choosing_{width}"), backend);
+        }
+    }
+
     #[test]
     fn records_where_each_card_was_drawn() {
         let cards = every_phase();
@@ -632,6 +737,7 @@ mod tests {
             (key(KeyCode::Char('c'), none), Some(Action::FocusConductor)),
             (key(KeyCode::Enter, none), Some(Action::Focus)),
             (key(KeyCode::Char('m'), none), Some(Action::Message)),
+            (key(KeyCode::Char('d'), none), Some(Action::Decide)),
             (key(KeyCode::Char('o'), none), Some(Action::OpenPr)),
             (key(KeyCode::Char('x'), none), None),
             (key(KeyCode::Char('j'), none), Some(Action::Down)),

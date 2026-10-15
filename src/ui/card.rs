@@ -279,7 +279,7 @@ pub fn fit(spans: Vec<Span<'_>>, width: usize) -> Line<'static> {
     Line::from(out)
 }
 
-fn owned(span: Span<'_>) -> Span<'static> {
+pub fn owned(span: Span<'_>) -> Span<'static> {
     Span::styled(span.content.into_owned(), span.style)
 }
 
