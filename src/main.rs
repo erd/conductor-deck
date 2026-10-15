@@ -1,6 +1,12 @@
+#[expect(
+    dead_code,
+    reason = "actions and subscribe are consumed by the deck UI in #5-#7"
+)]
+mod herdr;
 mod ui;
 
 use std::io::{self, Stdout};
+use std::process::ExitCode;
 
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::execute;
@@ -10,11 +16,55 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-fn main() -> io::Result<()> {
+use herdr::{HerdrClient, HerdrError, SocketClient};
+
+fn main() -> ExitCode {
+    let result = if std::env::args().skip(1).any(|arg| arg == "--probe") {
+        SocketClient::from_env().and_then(|client| probe(&client))
+    } else {
+        deck().map_err(HerdrError::from)
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("conductor-deck: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn deck() -> io::Result<()> {
     install_panic_hook();
     let _guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     run(&mut terminal)
+}
+
+/// Prints the plugin context and one `agent get` per pane in the deck's workspace, to check the
+/// client by hand against a real herdr.
+fn probe(herdr: &impl HerdrClient) -> herdr::Result<()> {
+    let context = herdr.plugin_context()?;
+    println!("{context:#?}");
+    let snapshot = herdr.snapshot()?;
+    let workspace = context.workspace_id.as_deref();
+    for pane in snapshot
+        .panes
+        .iter()
+        .filter(|pane| workspace.is_none_or(|ws| pane.workspace_id == ws))
+    {
+        match herdr.agent_get(&pane.pane_id) {
+            Ok(agent) => println!(
+                "{}\t{}\t{}\t{}",
+                pane.pane_id,
+                agent.status.as_str(),
+                agent.tokens.context.as_deref().unwrap_or("-"),
+                agent.tokens.limit.as_deref().unwrap_or("-"),
+            ),
+            Err(HerdrError::NotFound { .. }) => println!("{}\tno agent", pane.pane_id),
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
 }
 
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
