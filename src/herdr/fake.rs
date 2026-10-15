@@ -181,4 +181,21 @@ mod tests {
         );
         assert_eq!(sub.events.recv().unwrap(), event);
     }
+
+    #[test]
+    fn forwards_wrapped_events() {
+        let herdr = fake();
+        let (tx, rx) = mpsc::channel();
+        let _forwarding = herdr
+            .subscribe(&[])
+            .unwrap()
+            .forward(tx, |event| ("herdr", event))
+            .unwrap();
+        assert_eq!(
+            rx.recv().unwrap(),
+            ("herdr", HerdrEvent::Resync(Snapshot::default()))
+        );
+        herdr.emit(&HerdrEvent::Disconnected);
+        assert_eq!(rx.recv().unwrap(), ("herdr", HerdrEvent::Disconnected));
+    }
 }
