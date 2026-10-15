@@ -1,0 +1,24 @@
+---
+source: src/ui/mod.rs
+expression: terminal.backend().clone()
+---
+"web                             !2 ●1 ⇡1"
+"┏ fix-login-07: auth-flow ━━━━━━━━ 1/2 ┓"
+"┃How should expired sessions recover?  ┃"
+"┃Sessions expire mid-checkout and the  ┃"
+"┃redirect loops.                       ┃"
+"┃                                      ┃"
+"┃  Refresh tokens                   REC┃"
+"┃    rotate on every request           ┃"
+"┃› Sliding sessions                    ┃"
+"┃    extend on activity                ┃"
+"┃  Force a new login                   ┃"
+"┃  other…                              ┃"
+"┃                                      ┃"
+"┃note › keep it behind a flag          ┃"
+"┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+"                                        "
+"                                        "
+"                                        "
+"                                        "
+"⏎ answer · tab options · esc cancel     "

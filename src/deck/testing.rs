@@ -6,8 +6,8 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use conductor_state::{
-    Decision, Home, Phase, SchemaV1, Task, TaskKind, events_path, write_decision_atomic,
-    write_task_atomic,
+    Decision, DecisionOption, Home, Phase, SchemaV1, Task, TaskKind, events_path,
+    write_decision_atomic, write_task_atomic,
 };
 use jiff::Timestamp;
 use tempfile::TempDir;
@@ -53,6 +53,27 @@ pub fn task(id: &str, phase: Phase) -> Task {
         pr_url: None,
         created_at: ts,
         updated_at: ts,
+    }
+}
+
+/// An open decision titled `Pick <key>`, offering `options` as `(value, label, hint)`.
+pub fn decision(key: &str, options: &[(&str, &str, Option<&str>)]) -> Decision {
+    Decision {
+        schema: SchemaV1,
+        key: key.into(),
+        title: format!("Pick {key}"),
+        about: String::new(),
+        options: options
+            .iter()
+            .map(|&(value, label, hint)| DecisionOption {
+                value: value.into(),
+                label: label.into(),
+                hint: hint.map(Into::into),
+            })
+            .collect(),
+        recommend: None,
+        allow_freeform: false,
+        answer: None,
     }
 }
 

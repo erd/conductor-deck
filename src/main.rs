@@ -25,7 +25,7 @@ use deck::{CardModel, Deck};
 use herdr::types::PluginContext;
 use herdr::{Forwarding, HerdrClient, HerdrError, HerdrEvent, SocketClient};
 use repo::Location;
-use ui::{Action, Body, Input, InputOutcome, Selection, View};
+use ui::{Action, Body, DecisionModal, DecisionOutcome, Input, InputOutcome, Selection, View};
 
 type BoxError = Box<dyn std::error::Error>;
 
@@ -91,6 +91,7 @@ fn show_until_quit(
             show_hidden: false,
             toast: None,
             input: None,
+            decision: None,
         };
         terminal.draw(|frame| ui::draw(frame, &view, &mut selection))?;
         match rx.recv() {
@@ -180,6 +181,8 @@ struct App<'a> {
     toast: Option<(String, Instant)>,
     /// The message being typed, while `m` is open.
     compose: Option<Compose>,
+    /// The decisions being answered, while `d` is open.
+    decision: Option<DecisionModal>,
 }
 
 /// A message to a worker, being typed.
@@ -214,6 +217,7 @@ impl<'a> App<'a> {
             problem: None,
             toast: None,
             compose: None,
+            decision: None,
         })
     }
 
@@ -247,6 +251,7 @@ impl<'a> App<'a> {
                 show_hidden: self.deck.show_hidden,
                 toast: self.toast.as_ref().map(|(text, _)| text.as_str()),
                 input: self.compose.as_ref().map(|compose| compose.input.text()),
+                decision: self.decision.as_ref(),
             };
             terminal.draw(|frame| ui::draw(frame, &view, &mut self.selection))?;
             let ids: Vec<&str> = cards.iter().map(|card| card.task.id.as_str()).collect();
@@ -298,6 +303,31 @@ impl<'a> App<'a> {
 
     /// Acts on a key press or click, against the cards as last drawn. Returns `false` to quit.
     fn handle_input(&mut self, event: &Event, cards: &[CardModel], ids: &[&str]) -> bool {
+        if let Some(modal) = &mut self.decision {
+            if let Event::Key(key) = event {
+                match modal.handle(key) {
+                    DecisionOutcome::Open => {}
+                    DecisionOutcome::Cancel => self.decision = None,
+                    DecisionOutcome::Submit(answer) => {
+                        let toast = match actions::conductor_bin() {
+                            Some(bin) => Some(actions::answer_decision(
+                                self.herdr,
+                                actions::run_conductor,
+                                &bin,
+                                self.deck.repo_id(),
+                                modal.task_id(),
+                                modal.pane(),
+                                &answer,
+                            )),
+                            None => Some("set CONDUCTOR_BIN or HOME to find conductor".to_owned()),
+                        };
+                        self.decision = None;
+                        self.show(toast);
+                    }
+                }
+            }
+            return true;
+        }
         if let Some(compose) = &mut self.compose {
             if let Event::Key(key) = event {
                 match compose.input.handle(key) {
@@ -347,6 +377,13 @@ impl<'a> App<'a> {
                         pane,
                         input: Input::default(),
                     });
+                    None
+                }
+                Err(toast) => Some(toast),
+            }),
+            Action::Decide => selected.and_then(|card| match actions::start_decision(card) {
+                Ok(modal) => {
+                    self.decision = Some(modal);
                     None
                 }
                 Err(toast) => Some(toast),

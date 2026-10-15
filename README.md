@@ -37,10 +37,18 @@ The UI snapshot tests use [insta](https://insta.rs). After a deliberate change t
 | `j`/`k`, `↓`/`↑`, mouse wheel | Move the selection |
 | `Enter`, click | Jump to the card's worker |
 | `m` | Message the card's worker: type a line, `Enter` sends, `Esc` cancels |
+| `d` | Answer the card's open decisions, oldest first (see below) |
 | `o` | Open the card's PR in the browser |
 | `c` | Jump to the conductor |
 | `L` | Show or hide torn-down and abandoned tasks |
 | `q`, Ctrl-C | Close the deck |
+
+In the decision modal, `↑`/`↓` (or `j`/`k`) choose an option, `Tab` moves to the note, `n`/`p`
+show the next or previous open decision, `Enter` answers and `Esc` cancels. A decision that allows
+free text has a last `other…` row, which answers with what's typed in the note. The deck records the
+answer with `conductor decision answer … --by deck`, then prompts the worker to continue. It runs
+`CONDUCTOR_BIN` if set, else `~/.cargo/bin/conductor`, since plugin panes start with a minimal
+`PATH`.
 
 To check the herdr client against a running herdr, run the binary with `--probe` from any herdr
 pane. It prints the plugin context, the conductor repo that workspace maps to (or why there is

@@ -15,4 +15,4 @@ expression: backend
 "│PR #123 ready · checks ✓ · changes re…│"
 "└──────────────────────────────────────┘"
 "                                        "
-"⏎ focus · m msg · o PR · q quit      1/2"
+"⏎ focus · m msg · d decide · q quit  1/2"
