@@ -1,23 +1,23 @@
-//! The deck's screen: a header with counts, the stacked cards, and a footer with key hints.
+//! The deck's screen: a header with counts, the cards stacked in sections, and a footer with
+//! key hints.
 
 mod card;
 mod decision;
 mod input;
 mod list;
 
-use conductor_state::Phase;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use jiff::Timestamp;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
-use ratatui::style::Stylize as _;
+use ratatui::style::{Style, Stylize as _};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget as _, Wrap};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 use crate::deck::CardModel;
-use crate::deck::card::Group;
+use crate::deck::card::{Section, State};
 pub use decision::{Answer, DecisionModal, Outcome as DecisionOutcome};
 pub use input::{Input, Outcome as InputOutcome};
 pub use list::Selection;
@@ -31,6 +31,8 @@ pub struct View<'a> {
     pub now: Timestamp,
     /// Whether torn-down and abandoned tasks are shown.
     pub show_hidden: bool,
+    /// Whether the Done section is folded to its rule.
+    pub fold_done: bool,
     /// A transient message above the footer.
     pub toast: Option<&'a str>,
     /// The message being typed, which replaces the footer while `m` is open.
@@ -61,6 +63,8 @@ pub enum Action {
     Up,
     Down,
     ToggleHidden,
+    /// Fold or unfold the Done section.
+    FoldDone,
     /// Jump to the selected card's worker.
     Focus,
     /// Type a message to the selected card's worker.
@@ -88,17 +92,21 @@ pub fn draw(frame: &mut Frame, view: &View, selection: &mut Selection) {
     let toast_height = toast.as_ref().map_or(0, |toast| {
         u16::try_from(toast.line_count(frame.area().width)).unwrap_or(u16::MAX)
     });
-    let [header, body, problem_area, toast_area, footer] = Layout::vertical([
-        Constraint::Length(1),
+    let [header, body, problem_area, toast_area, footer_rule, footer] = Layout::vertical([
+        Constraint::Length(2),
         Constraint::Fill(1),
         Constraint::Length(u16::from(problem.is_some())),
         Constraint::Length(toast_height),
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(frame.area());
     selection.clear_drawn();
     let buf = frame.buffer_mut();
     draw_header(view, header, buf);
+    Line::from("─".repeat(usize::from(footer_rule.width)))
+        .dim()
+        .render(footer_rule, buf);
     let position = match view.body {
         Body::NoConductor { reason } => {
             draw_message(Line::from("no conductor here").bold(), reason, body, buf);
@@ -115,7 +123,9 @@ pub fn draw(frame: &mut Frame, view: &View, selection: &mut Selection) {
             draw_message(Line::from("no tasks").dim(), "", body, buf);
             None
         }
-        Body::Cards { cards, .. } => draw_cards(cards, view.now, selection, body, buf),
+        Body::Cards { cards, .. } => {
+            draw_cards(cards, view.fold_done, view.now, selection, body, buf)
+        }
     };
     let modal_cursor = view
         .decision
@@ -146,48 +156,43 @@ pub fn draw(frame: &mut Frame, view: &View, selection: &mut Selection) {
     }
 }
 
-/// The repo name on the left and, with cards, how many need attention, are working, and are
-/// awaiting merge on the right.
+/// The repo name on the left and, with cards, how many are in each open section on the right,
+/// over a heavy rule.
 fn draw_header(view: &View, area: Rect, buf: &mut Buffer) {
+    let [top, rule] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
     let counts = match view.body {
         Body::Cards { cards, .. } => {
-            let count = |group| cards.iter().filter(|card| card.group == group).count();
-            let working = card::badge(Phase::Working);
-            let merge = card::badge(Phase::AwaitingMerge);
-            Line::from(vec![
-                Span::raw(format!(
-                    "{}{}",
-                    card::ATTENTION,
-                    count(Group::NeedsAttention)
-                ))
-                .yellow()
-                .bold(),
-                Span::raw(" "),
-                Span::styled(
-                    format!("{}{}", working.symbol, count(Group::Working)),
-                    working.style,
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    format!("{}{}", merge.symbol, count(Group::AwaitingMerge)),
-                    merge.style,
-                ),
-            ])
+            let mut spans = Vec::new();
+            for (section, state) in [
+                (Section::NeedsYou, State::NeedsYou),
+                (Section::Review, State::Review),
+                (Section::InProgress, State::InProgress),
+                (Section::Todo, State::Pending),
+            ] {
+                let badge = card::badge(state);
+                let count = cards.iter().filter(|c| c.section() == section).count();
+                spans.push(Span::styled(
+                    format!("{}{count} ", badge.symbol),
+                    badge.style,
+                ));
+            }
+            Line::from(spans)
         }
         Body::NoConductor { .. } | Body::HerdrUnreachable { .. } => Line::default(),
     };
     let counts_width = u16::try_from(counts.width()).unwrap_or(u16::MAX);
-    let [name, _, right] = Layout::horizontal([
-        Constraint::Fill(1),
-        Constraint::Length(u16::from(counts_width > 0)),
-        Constraint::Length(counts_width),
-    ])
-    .areas(area);
+    let [name, right] =
+        Layout::horizontal([Constraint::Fill(1), Constraint::Length(counts_width)]).areas(top);
     let repo = view.repo.unwrap_or("conductor");
-    Line::from(card::truncate(repo, usize::from(name.width)))
+    let label = " TASKS · ";
+    let room = usize::from(name.width).saturating_sub(label.width() + 1);
+    Line::from(format!("{label}{}", card::truncate(repo, room)))
         .bold()
         .render(name, buf);
     counts.render(right, buf);
+    Line::from("━".repeat(usize::from(rule.width)))
+        .bold()
+        .render(rule, buf);
 }
 
 /// A state with no cards: a title, and a dim explanation wrapped below it.
@@ -202,26 +207,106 @@ fn draw_message(title: Line<'static>, detail: &str, area: Rect, buf: &mut Buffer
         .render(area, buf);
 }
 
-/// Draws the cards that fit, scrolled to the selection, and returns the selected card's index.
+/// The cards that can be selected: all of them, or those above Done when it's folded. Done
+/// sorts last, so that's a prefix.
+pub fn shown(cards: &[CardModel], fold_done: bool) -> &[CardModel] {
+    let end = if fold_done {
+        (cards.iter())
+            .position(|card| card.section() == Section::Done)
+            .unwrap_or(cards.len())
+    } else {
+        cards.len()
+    };
+    &cards[..end]
+}
+
+/// Draws the cards that fit, each section under its rule, scrolled to the selection, and
+/// returns the selected card's index.
 fn draw_cards(
-    cards: &[CardModel],
+    all: &[CardModel],
+    fold_done: bool,
     now: Timestamp,
     selection: &mut Selection,
     area: Rect,
     buf: &mut Buffer,
 ) -> Option<usize> {
+    let cards = shown(all, fold_done);
+    let count = |section| all.iter().filter(|card| card.section() == section).count();
+    let folded = cards.len() < all.len();
+    let rule = |section: Section| section_rule(section, count(section), folded, area.width);
+    let starts_section =
+        |index: usize| index == 0 || cards[index - 1].section() != cards[index].section();
+    let last = cards.len().checked_sub(1);
+    // The rows each card takes in the stack: its section's rule above the first card, and the
+    // folded Done rule below the last.
+    let heights: Vec<u16> = (0..cards.len())
+        .map(|index| {
+            u16::from(starts_section(index))
+                + card::height(&cards[index], area.width)
+                + u16::from(folded && Some(index) == last)
+        })
+        .collect();
     let ids: Vec<&str> = cards.iter().map(|card| card.task.id.as_str()).collect();
-    let selected = selection.resolve(&ids)?;
-    let heights: Vec<u16> = cards.iter().map(card::height).collect();
+    let Some(selected) = selection.resolve(&ids) else {
+        rule(Section::Done).render(Rect { height: 1, ..area }, buf);
+        return None;
+    };
     let mut y = area.y;
+    let row = |y| Rect {
+        y,
+        height: 1,
+        ..area
+    };
     for index in selection.scroll(&heights, area.height) {
-        let height = heights[index].min(area.bottom() - y);
+        let card = &cards[index];
+        if starts_section(index) && y < area.bottom() {
+            rule(card.section()).render(row(y), buf);
+            y += 1;
+        }
+        let height = card::height(card, area.width).min(area.bottom() - y);
+        if height == 0 {
+            break;
+        }
         let rect = Rect { y, height, ..area };
-        card::render(&cards[index], now, index == selected, rect, buf);
+        card::render(card, now, index == selected, rect, buf);
         selection.drew(y..y + height, index);
         y += height;
+        if folded && Some(index) == last && y < area.bottom() {
+            rule(Section::Done).render(row(y), buf);
+            y += 1;
+        }
     }
     Some(selected)
+}
+
+/// ` IN PROGRESS ───── 2`, with `▾` or `▸` after Done's count.
+fn section_rule(section: Section, count: usize, folded: bool, width: u16) -> Line<'static> {
+    let label = match section {
+        Section::NeedsYou => "NEEDS YOU",
+        Section::InProgress => "IN PROGRESS",
+        Section::Review => "REVIEW",
+        Section::Todo => "TODO",
+        Section::Done => "DONE",
+    };
+    let label_style = if section == Section::NeedsYou {
+        Style::new().magenta().bold()
+    } else {
+        Style::new().dim()
+    };
+    let tail = match section {
+        Section::Done if folded => format!(" {count} ▸ "),
+        Section::Done => format!(" {count} ▾ "),
+        _ => format!(" {count} "),
+    };
+    let rule = usize::from(width).saturating_sub(label.width() + tail.width() + 2);
+    let line = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(label, label_style),
+        Span::raw(" ").dim(),
+        Span::raw("─".repeat(rule)).dim(),
+        Span::raw(tail).dim(),
+    ]);
+    card::fit(line.spans, usize::from(width))
 }
 
 /// An input line: `prompt` and as much of the end of `text` as fits. Returns where the
@@ -252,18 +337,21 @@ fn draw_input(prompt: Span<'_>, text: &str, area: Rect, buf: &mut Buffer) -> Pos
 /// Key hints on the left; the selection's position on the right.
 fn draw_footer(view: &View, position: Option<usize>, area: Rect, buf: &mut Buffer) {
     let position = match (position, view.body) {
-        (Some(index), Body::Cards { cards, .. }) => format!("{}/{}", index + 1, cards.len()),
+        (Some(index), Body::Cards { cards, .. }) => {
+            format!("{}/{}", index + 1, shown(cards, view.fold_done).len())
+        }
         _ => String::new(),
     };
     let position_width = u16::try_from(position.len()).unwrap_or(u16::MAX);
-    let [left, _, right] = Layout::horizontal([
+    let [_, left, _, right] = Layout::horizontal([
+        Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(u16::from(position_width > 0)),
         Constraint::Length(position_width),
     ])
     .areas(area);
     let hints = match view.body {
-        Body::Cards { .. } => card_hints(view.show_hidden, usize::from(left.width)),
+        Body::Cards { .. } => card_hints(view.show_hidden, view.fold_done, usize::from(left.width)),
         Body::NoConductor { .. } | Body::HerdrUnreachable { .. } => "q quit".to_owned(),
     };
     card::fit(vec![Span::raw(hints)], usize::from(left.width))
@@ -273,8 +361,13 @@ fn draw_footer(view: &View, position: Option<usize>, area: Rect, buf: &mut Buffe
 }
 
 /// As many key hints as fit in `width`, most useful first, always ending with `q quit`.
-fn card_hints(show_hidden: bool, width: usize) -> String {
+fn card_hints(show_hidden: bool, fold_done: bool, width: usize) -> String {
     const QUIT: &str = "q quit";
+    let fold = if fold_done {
+        "z show done"
+    } else {
+        "z fold done"
+    };
     let toggle = if show_hidden {
         "L hide done"
     } else {
@@ -287,6 +380,7 @@ fn card_hints(show_hidden: bool, width: usize) -> String {
         "d decide",
         "o PR",
         "c conductor",
+        fold,
         toggle,
         "j/k move",
     ] {
@@ -326,6 +420,7 @@ pub fn action(event: &Event) -> Option<Action> {
             KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
             KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
             KeyCode::Char('L') => Some(Action::ToggleHidden),
+            KeyCode::Char('z') => Some(Action::FoldDone),
             KeyCode::Enter => Some(Action::Focus),
             KeyCode::Char('m') => Some(Action::Message),
             KeyCode::Char('d') => Some(Action::Decide),
@@ -352,7 +447,7 @@ mod tests {
     use ratatui::style::Color;
 
     use super::*;
-    use conductor_state::Decision;
+    use conductor_state::{Decision, Phase};
 
     use crate::deck::testing::{REPO_ID, TempRepo, decision, event, fixture, task, ts};
     use crate::deck::{AgentInfo, Deck};
@@ -372,6 +467,7 @@ mod tests {
             body: Body::Cards { cards, problem },
             now: ts(NOW),
             show_hidden: false,
+            fold_done: false,
             toast: None,
             input: None,
             decision: None,
@@ -485,6 +581,68 @@ mod tests {
     }
 
     #[test]
+    fn sections_and_folded_done() {
+        let repo = TempRepo::new();
+        let prompt = event("12:00:00", r#""kind":"prompt","text":"go""#);
+        add(
+            &repo,
+            "work-01",
+            Phase::Working,
+            "Fix the login redirect",
+            &[prompt],
+        );
+        add(
+            &repo,
+            "brief-02",
+            Phase::Briefed,
+            "Brief the export job",
+            &[],
+        );
+        add(
+            &repo,
+            "merged-03",
+            Phase::Merged,
+            "Rename the config file",
+            &[],
+        );
+        add(&repo, "merged-04", Phase::Merged, "Bump dependencies", &[]);
+        let cards = cards(&repo);
+        let ids: Vec<&str> = cards.iter().map(|card| card.task.id.as_str()).collect();
+        for width in [40, 60] {
+            // Done open, with a done row selected.
+            let mut selection = Selection::default();
+            selection.move_by(&ids, 2);
+            let view = cards_view(&cards, None);
+            let open = render(width, 20, &view, &mut selection);
+            assert_snapshot!(format!("sections_done_open_{width}"), open);
+
+            // Folded, the selection falls back to the last card still shown.
+            let folded = View {
+                fold_done: true,
+                ..view
+            };
+            let shown: Vec<&str> = shown(&cards, true)
+                .iter()
+                .map(|card| card.task.id.as_str())
+                .collect();
+            assert_eq!(shown, ["work-01", "brief-02"]);
+            assert_eq!(selection.resolve(&shown), Some(1));
+            let backend = render(width, 20, &folded, &mut selection);
+            assert_snapshot!(format!("sections_done_folded_{width}"), backend);
+        }
+        // Only done cards, folded: just the rule.
+        let done = &cards[2..];
+        let view = View {
+            fold_done: true,
+            ..cards_view(done, None)
+        };
+        let mut selection = Selection::default();
+        let backend = render(40, 8, &view, &mut selection);
+        assert_snapshot!("sections_only_done_folded", backend);
+        assert_eq!(selection.card_at(2), None);
+    }
+
+    #[test]
     fn needs_permission_and_pr_line() {
         let repo = TempRepo::new();
         add(
@@ -521,6 +679,7 @@ mod tests {
             },
             now: ts(NOW),
             show_hidden: false,
+            fold_done: false,
             toast: None,
             input: None,
             decision: None,
@@ -581,15 +740,20 @@ mod tests {
         let cards = every_phase();
         let backend = render(40, 64, &cards_view(&cards, None), &mut Selection::default());
         let buffer = backend.buffer();
-        // The first card is selected; the second isn't.
-        assert_eq!(buffer[(0, 1)].symbol(), "┏");
-        assert_eq!(buffer[(0, 6)].symbol(), "┌");
+        // Under the header and the NEEDS YOU rule, the first card is selected; the second
+        // isn't, but needs you, so its border is magenta.
+        assert_eq!(buffer[(0, 3)].symbol(), "┏");
+        assert_eq!(buffer[(0, 3)].fg, Color::White);
         let failed = cards
             .iter()
             .position(|card| card.task.phase == Phase::Failed);
         assert_eq!(failed, Some(0));
-        assert_eq!(buffer[(1, 2)].symbol(), "✗");
-        assert_eq!(buffer[(1, 2)].fg, Color::Red);
+        assert_eq!(buffer[(2, 4)].symbol(), "✗");
+        assert_eq!(buffer[(2, 4)].fg, Color::Red);
+        assert_eq!(buffer[(0, 8)].symbol(), "╭");
+        assert_eq!(buffer[(0, 8)].fg, Color::Magenta);
+        assert_eq!(buffer[(2, 9)].symbol(), "⚑");
+        assert_eq!(buffer[(2, 9)].fg, Color::Magenta);
     }
 
     #[test]
@@ -700,16 +864,18 @@ mod tests {
     fn records_where_each_card_was_drawn() {
         let cards = every_phase();
         let mut selection = Selection::default();
-        render(40, 12, &cards_view(&cards, None), &mut selection);
-        // The header is row 0; the first two cards take five rows each.
-        assert_eq!(selection.card_at(0), None);
-        assert_eq!(selection.card_at(1), Some(0));
-        assert_eq!(selection.card_at(5), Some(0));
-        assert_eq!(selection.card_at(6), Some(1));
-        assert_eq!(selection.card_at(11), None);
+        render(40, 20, &cards_view(&cards, None), &mut selection);
+        // The header takes rows 0 and 1 and the NEEDS YOU rule row 2; the first two cards
+        // take five rows each, then comes the REVIEW rule.
+        assert_eq!(selection.card_at(2), None);
+        assert_eq!(selection.card_at(3), Some(0));
+        assert_eq!(selection.card_at(7), Some(0));
+        assert_eq!(selection.card_at(8), Some(1));
+        assert_eq!(selection.card_at(12), Some(1));
+        assert_eq!(selection.card_at(13), None);
 
-        render(40, 12, &cards_view(&[], None), &mut selection);
-        assert_eq!(selection.card_at(1), None);
+        render(40, 20, &cards_view(&[], None), &mut selection);
+        assert_eq!(selection.card_at(3), None);
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -739,6 +905,7 @@ mod tests {
             (key(KeyCode::Char('m'), none), Some(Action::Message)),
             (key(KeyCode::Char('d'), none), Some(Action::Decide)),
             (key(KeyCode::Char('o'), none), Some(Action::OpenPr)),
+            (key(KeyCode::Char('z'), none), Some(Action::FoldDone)),
             (key(KeyCode::Char('x'), none), None),
             (key(KeyCode::Char('j'), none), Some(Action::Down)),
             (key(KeyCode::Down, none), Some(Action::Down)),

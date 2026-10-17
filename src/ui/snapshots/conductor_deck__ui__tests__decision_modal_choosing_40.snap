@@ -2,8 +2,9 @@
 source: src/ui/mod.rs
 expression: backend
 ---
-"web                             !2 ●1 ⇡1"
-"┏ fix-login-07: auth-flow ━━━━━━━━━━━━━┓"
+" TASKS · web                ⚑2 ◆2 ◐1 ·3 "
+"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+"┏━ fix-login-07: auth-flow ━━━━━━━━━━━━┓"
 "┃How should expired sessions recover?  ┃"
 "┃Sessions expire mid-checkout and the  ┃"
 "┃redirect loops.                       ┃"
@@ -19,6 +20,5 @@ expression: backend
 "                                        "
 "                                        "
 "                                        "
-"                                        "
-"                                        "
+"────────────────────────────────────────"
 "⏎ answer · tab note · esc cancel        "

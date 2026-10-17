@@ -294,7 +294,7 @@ mod tests {
     use conductor_state::events_path;
 
     use super::*;
-    use crate::deck::card::{Attention, Group};
+    use crate::deck::card::{Attention, State};
     use crate::deck::testing::{REPO_ID, TempRepo, event, fixture, task};
     use crate::herdr::fake::FakeHerdr;
     use crate::herdr::types::{AgentStatus, PluginContext, Snapshot, Tokens};
@@ -393,7 +393,7 @@ mod tests {
         fs::write(repo.task_dir("t").join("task.json"), "{").unwrap();
         deck.task_changed("t");
         assert!(deck.errors().contains_key("t"));
-        assert_eq!(deck.cards()[0].group, Group::Working);
+        assert_eq!(deck.cards()[0].state, State::InProgress);
 
         repo.add_task("t", Phase::Working, &[]);
         deck.task_changed("t");
@@ -444,7 +444,7 @@ mod tests {
         let a = card(&cards, "a");
         assert_eq!(a.agent.as_ref().unwrap().context.as_deref(), Some("⛁ 26%"));
         // Idle by its events, but herdr says it's working.
-        assert_eq!(a.group, Group::Working);
+        assert!(a.working());
         assert_eq!(card(&cards, "b").agent, None);
 
         set_agents(

@@ -120,6 +120,7 @@ fn show_until_quit(
             body,
             now: Timestamp::now(),
             show_hidden: false,
+            fold_done: false,
             toast: None,
             input: None,
             decision: None,
@@ -204,6 +205,8 @@ struct App<'a> {
     /// The repo's name, for the header.
     repo: String,
     selection: Selection,
+    /// Whether the Done section is folded, with `z`.
+    fold_done: bool,
     tx: Sender<AppEvent>,
     rx: mpsc::Receiver<AppEvent>,
     _watcher: TaskWatcher,
@@ -248,6 +251,7 @@ impl<'a> App<'a> {
             deck,
             repo,
             selection: Selection::default(),
+            fold_done: false,
             tx,
             rx,
             _watcher: watcher,
@@ -307,12 +311,15 @@ impl<'a> App<'a> {
                 },
                 now: self.deck.now(),
                 show_hidden: self.deck.show_hidden,
+                fold_done: self.fold_done,
                 toast: self.toast.as_ref().map(|(text, _)| text.as_str()),
                 input: self.compose.as_ref().map(|compose| compose.input.text()),
                 decision: self.decision.as_ref(),
             };
             terminal.draw(|frame| ui::draw(frame, &view, &mut self.selection))?;
-            let ids: Vec<&str> = cards.iter().map(|card| card.task.id.as_str()).collect();
+            // Folded Done cards can't be selected.
+            let shown = ui::shown(&cards, self.fold_done);
+            let ids: Vec<&str> = shown.iter().map(|card| card.task.id.as_str()).collect();
 
             let wake = [self.toast.as_ref().map(|(_, until)| *until), self.width_due]
                 .into_iter()
@@ -333,7 +340,7 @@ impl<'a> App<'a> {
             for event in pending {
                 match event {
                     AppEvent::Input(event) => {
-                        if !self.handle_input(&event, &cards, &ids) {
+                        if !self.handle_input(&event, shown, &ids) {
                             return Ok(());
                         }
                     }
@@ -434,6 +441,10 @@ impl<'a> App<'a> {
             }
             Action::ToggleHidden => {
                 self.deck.show_hidden = !self.deck.show_hidden;
+                None
+            }
+            Action::FoldDone => {
+                self.fold_done = !self.fold_done;
                 None
             }
             Action::Focus => selected.and_then(|card| actions::focus_worker(self.herdr, card)),

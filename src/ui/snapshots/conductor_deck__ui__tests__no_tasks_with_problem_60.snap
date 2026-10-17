@@ -2,11 +2,11 @@
 source: src/ui/mod.rs
 expression: backend
 ---
-"web                                                 !0 ●0 ⇡0"
+" TASKS · web                                    ⚑0 ◆0 ◐0 ·0 "
+"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 "                                                            "
 "                          no tasks                          "
 "                                                            "
-"                                                            "
-"                                                            "
 "! herdr socket: Broken pipe                                 "
-"⏎ focus · m msg · d decide · o PR · c conductor · q quit    "
+"────────────────────────────────────────────────────────────"
+" ⏎ focus · m msg · d decide · o PR · c conductor · q quit   "
