@@ -202,11 +202,15 @@ pub fn render(modal: &DecisionModal, area: Rect, buf: &mut Buffer) -> Option<Pos
     Clear.render(area, buf);
     let decision = modal.decision();
     let width = usize::from(area.width.saturating_sub(2));
+    let border = Style::new().magenta().bold();
     let title = format!(" {}: {} ", modal.task_id, decision.key);
     let mut block = Block::bordered()
         .border_type(BorderType::Thick)
-        .border_style(Style::new().yellow())
-        .title(Line::from(card::truncate(&title, width)).bold());
+        .border_style(border)
+        .title(Line::from(vec![
+            Span::styled("━", border),
+            Span::raw(card::truncate(&title, width.saturating_sub(1))).bold(),
+        ]));
     if modal.several() {
         let position = format!(" {}/{} ", modal.index + 1, modal.decisions.len());
         block = block.title(Line::from(position).right_aligned());

@@ -18,13 +18,45 @@ pub struct AgentInfo {
     pub limit: Option<String>,
 }
 
-/// The sort groups, top of the deck first.
+/// The deck's sections, top first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Group {
-    NeedsAttention,
-    AwaitingMerge,
-    Working,
-    Other,
+pub enum Section {
+    NeedsYou,
+    Review,
+    InProgress,
+    Todo,
+    Done,
+}
+
+/// Where a task stands, as the card's badge shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    /// A permission prompt, an open decision, a `blocked` report or requested changes.
+    NeedsYou,
+    /// The worker or the PR's checks failed, or the task's phase is `failed`.
+    Failed,
+    /// The worker is running, mid-turn or between turns.
+    InProgress,
+    /// The conductor is reviewing the worker's draft PR or report.
+    Review,
+    /// The PR is ready; waiting for a human to merge it.
+    ReadyToMerge,
+    /// No worker yet.
+    Pending,
+    /// Merged, torn down or abandoned.
+    Done,
+}
+
+impl State {
+    pub fn section(self) -> Section {
+        match self {
+            Self::NeedsYou | Self::Failed => Section::NeedsYou,
+            Self::InProgress => Section::InProgress,
+            Self::Review | Self::ReadyToMerge => Section::Review,
+            Self::Pending => Section::Todo,
+            Self::Done => Section::Done,
+        }
+    }
 }
 
 /// Why a card needs attention.
@@ -51,33 +83,25 @@ pub struct CardModel {
     pub agent: Option<AgentInfo>,
     /// Oldest first.
     pub open_decisions: Vec<Decision>,
-    /// Empty unless `group` is [`Group::NeedsAttention`].
+    /// Empty unless `state` is [`State::NeedsYou`] or [`State::Failed`].
     pub attention: Vec<Attention>,
-    pub group: Group,
-    /// When the card entered the state that puts it in `group`.
+    pub state: State,
+    /// When the card entered the state that puts it in its section.
     pub since: Timestamp,
 }
 
 impl CardModel {
     pub fn new(state: &TaskState, agent: Option<&AgentInfo>) -> Self {
         let attention = attention(state, agent);
-        let agent_working = agent.is_some_and(|a| a.status == AgentStatus::Working);
-        let group = if !attention.is_empty() {
-            Group::NeedsAttention
-        } else if state.task.phase == Phase::AwaitingMerge {
-            Group::AwaitingMerge
-        } else if matches!(state.live.activity, Activity::Working { .. }) || agent_working {
-            Group::Working
-        } else {
-            Group::Other
-        };
-        let since = match group {
-            Group::NeedsAttention => attention
+        let working = working(&state.live, agent);
+        let card_state = card_state(state.task.phase, &attention, working);
+        let since = match card_state.section() {
+            Section::NeedsYou => attention
                 .iter()
                 .filter_map(|reason| reason_since(state, *reason))
                 .min(),
-            Group::AwaitingMerge => state.phase_changed(),
-            Group::Working | Group::Other => state.live.since,
+            Section::Review | Section::Done => state.phase_changed(),
+            Section::InProgress | Section::Todo => state.live.since,
         }
         .unwrap_or(state.task.updated_at);
         let mut open_decisions = state.open_decisions.clone();
@@ -88,9 +112,18 @@ impl CardModel {
             agent: agent.cloned(),
             open_decisions,
             attention,
-            group,
+            state: card_state,
             since,
         }
+    }
+
+    pub fn section(&self) -> Section {
+        self.state.section()
+    }
+
+    /// Whether the worker is mid-turn, by its events or by herdr.
+    pub fn working(&self) -> bool {
+        working(&self.live, self.agent.as_ref())
     }
 
     /// Time in the current state as of `now`.
@@ -109,10 +142,44 @@ impl CardModel {
     }
 }
 
-/// Needs attention first, then awaiting merge, working, and the rest; the longest in its
-/// state first within a group.
+/// By section, then the longest in its state first.
 pub fn sort(cards: &mut [CardModel]) {
-    cards.sort_by(|a, b| (a.group, a.since, &a.task.id).cmp(&(b.group, b.since, &b.task.id)));
+    cards.sort_by(|a, b| {
+        (a.section(), a.since, &a.task.id).cmp(&(b.section(), b.since, &b.task.id))
+    });
+}
+
+fn working(live: &LiveStatus, agent: Option<&AgentInfo>) -> bool {
+    matches!(live.activity, Activity::Working { .. })
+        || agent.is_some_and(|a| a.status == AgentStatus::Working)
+}
+
+/// Attention first, then the phase; a running worker counts as in progress until review.
+fn card_state(phase: Phase, attention: &[Attention], working: bool) -> State {
+    let needs_you = attention.iter().any(|reason| {
+        matches!(
+            reason,
+            Attention::Permission
+                | Attention::Decision
+                | Attention::Blocked
+                | Attention::ChangesRequested
+        )
+    });
+    if needs_you {
+        return State::NeedsYou;
+    }
+    if !attention.is_empty() {
+        return State::Failed;
+    }
+    match phase {
+        Phase::Merged | Phase::TornDown | Phase::Abandoned => State::Done,
+        Phase::AwaitingMerge => State::ReadyToMerge,
+        Phase::Failed => State::Failed,
+        _ if working => State::InProgress,
+        Phase::Review => State::Review,
+        Phase::Working | Phase::NeedsDecision => State::InProgress,
+        Phase::Intake | Phase::Briefed | Phase::Spawning => State::Pending,
+    }
 }
 
 fn attention(state: &TaskState, agent: Option<&AgentInfo>) -> Vec<Attention> {
@@ -188,41 +255,94 @@ mod tests {
     }
 
     #[test]
-    fn fixtures_land_in_their_groups() {
+    fn fixtures_land_in_their_states() {
+        // The state, and whether the worker is mid-turn.
         let cases = [
             (
                 "needs_permission.jsonl",
                 Phase::Working,
-                Group::NeedsAttention,
+                State::NeedsYou,
+                false,
             ),
             (
                 "decisions.jsonl",
                 Phase::NeedsDecision,
-                Group::NeedsAttention,
+                State::NeedsYou,
+                false,
             ),
             (
                 "pr_lifecycle.jsonl",
                 Phase::AwaitingMerge,
-                Group::AwaitingMerge,
+                State::ReadyToMerge,
+                true,
             ),
-            ("working_tool.jsonl", Phase::Working, Group::Working),
+            (
+                "working_tool.jsonl",
+                Phase::Working,
+                State::InProgress,
+                true,
+            ),
             (
                 "working_between_tools.jsonl",
                 Phase::Working,
-                Group::Working,
+                State::InProgress,
+                true,
             ),
-            ("compact_mid_turn.jsonl", Phase::Working, Group::Working),
-            ("permission_granted.jsonl", Phase::Working, Group::Working),
-            ("unknown_kind.jsonl", Phase::Working, Group::Working),
-            ("idle.jsonl", Phase::Review, Group::Other),
-            ("idle_error.jsonl", Phase::Working, Group::Other),
-            ("exited.jsonl", Phase::Working, Group::Other),
-            ("resumed.jsonl", Phase::Working, Group::Other),
-            ("pr_closed.jsonl", Phase::Working, Group::Working),
+            (
+                "compact_mid_turn.jsonl",
+                Phase::Working,
+                State::InProgress,
+                true,
+            ),
+            (
+                "permission_granted.jsonl",
+                Phase::Working,
+                State::InProgress,
+                true,
+            ),
+            (
+                "unknown_kind.jsonl",
+                Phase::Working,
+                State::InProgress,
+                true,
+            ),
+            ("idle.jsonl", Phase::Review, State::Review, false),
+            ("idle_error.jsonl", Phase::Working, State::InProgress, false),
+            ("exited.jsonl", Phase::Working, State::InProgress, false),
+            ("resumed.jsonl", Phase::Working, State::InProgress, false),
+            ("pr_closed.jsonl", Phase::Working, State::InProgress, true),
+            ("idle.jsonl", Phase::Failed, State::Failed, false),
+            ("exited.jsonl", Phase::Merged, State::Done, false),
         ];
-        for (name, phase, group) in cases {
-            assert_eq!(card(phase, &fixture(name), None).group, group, "{name}");
+        for (name, phase, state, working) in cases {
+            let card = card(phase, &fixture(name), None);
+            assert_eq!((card.state, card.working()), (state, working), "{name}");
         }
+    }
+
+    #[test]
+    fn phases_without_events() {
+        let cases = [
+            (Phase::Intake, State::Pending),
+            (Phase::Briefed, State::Pending),
+            (Phase::Spawning, State::Pending),
+            (Phase::Working, State::InProgress),
+            (Phase::Review, State::Review),
+            (Phase::AwaitingMerge, State::ReadyToMerge),
+            (Phase::Failed, State::Failed),
+            (Phase::Merged, State::Done),
+            (Phase::TornDown, State::Done),
+            (Phase::Abandoned, State::Done),
+        ];
+        for (phase, state) in cases {
+            assert_eq!(card(phase, &[], None).state, state, "{phase:?}");
+        }
+    }
+
+    #[test]
+    fn a_running_worker_in_review_is_in_progress() {
+        let card = card(Phase::Review, &fixture("working_tool.jsonl"), None);
+        assert_eq!(card.state, State::InProgress);
     }
 
     #[test]
@@ -267,7 +387,7 @@ mod tests {
         assert_eq!(changes.since, ts("12:20:00"));
         // Approved, then merged.
         let approved = card(Phase::AwaitingMerge, &lines[..8], None);
-        assert_eq!(approved.group, Group::AwaitingMerge);
+        assert_eq!(approved.state, State::ReadyToMerge);
         assert_eq!(approved.since, ts("12:08:00"));
     }
 
@@ -294,21 +414,21 @@ mod tests {
         let blocked = card(Phase::Working, &lines, Some(&agent(AgentStatus::Blocked)));
         assert_eq!(blocked.attention, [Attention::Permission]);
         let working = card(Phase::Working, &lines, Some(&agent(AgentStatus::Working)));
-        assert_eq!(working.group, Group::Working);
+        assert!(working.working());
         let idle = card(Phase::Working, &lines, Some(&agent(AgentStatus::Idle)));
-        assert_eq!(idle.group, Group::Other);
+        assert!(!idle.working());
     }
 
     #[test]
     fn no_events_falls_back_to_updated_at() {
         let card = card(Phase::Briefed, &[], None);
-        assert_eq!(card.group, Group::Other);
+        assert_eq!(card.state, State::Pending);
         assert_eq!(card.since, ts("11:00:00"));
         assert_eq!(card.elapsed(ts("11:01:30")), SignedDuration::from_secs(90));
     }
 
     #[test]
-    fn sorts_by_group_then_oldest_first() {
+    fn sorts_by_section_then_oldest_first() {
         let make = |id: &str, phase, lines: &[String]| {
             let mut card = card(phase, lines, None);
             card.task.id = id.into();
@@ -318,6 +438,8 @@ mod tests {
         let prompt = r#""kind":"prompt","text":"go""#;
         let permission = r#""kind":"attention","type":"permission_prompt","message":"Bash""#;
         let mut cards = vec![
+            make("merged", Phase::Merged, &[]),
+            make("brief", Phase::Briefed, &[]),
             make("idle", Phase::Working, &[event("12:00:00", start)]),
             make("working-new", Phase::Working, &[event("12:05:00", prompt)]),
             make("merge", Phase::AwaitingMerge, &[]),
@@ -333,9 +455,11 @@ mod tests {
                 "perm-old",
                 "perm-new",
                 "merge",
+                "idle",
                 "working-old",
                 "working-new",
-                "idle"
+                "brief",
+                "merged"
             ]
         );
     }

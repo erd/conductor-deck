@@ -5,6 +5,12 @@ Conductor task visualizer for herdr.
 A [herdr](https://herdr.dev) plugin that shows [conductor](https://github.com/erd/conductor) tasks
 as stacked cards, docked to the right of the conductor's pane.
 
+Cards sit in sections, most urgent first: NEEDS YOU (`⚑` a permission prompt, an open decision, a
+`blocked` report or requested changes; `✗` a failure), REVIEW (`◆` in review, `⇡` ready to merge),
+IN PROGRESS (`◐` a running worker), TODO (`·` no worker yet) and DONE (`✓`, one row each). Each
+card shows its state, what the worker is on and the time in that state; the task's title, wrapped
+to three lines; its context use and branch; and its PR.
+
 ## Install
 
 ```sh
@@ -40,6 +46,7 @@ The UI snapshot tests use [insta](https://insta.rs). After a deliberate change t
 | `d` | Answer the card's open decisions, oldest first (see below) |
 | `o` | Open the card's PR in the browser |
 | `c` | Jump to the conductor |
+| `z` | Fold or unfold the Done section |
 | `L` | Show or hide torn-down and abandoned tasks |
 | `q`, Ctrl-C | Close the deck |
 
