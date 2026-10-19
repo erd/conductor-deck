@@ -109,3 +109,7 @@ herdr sizes splits by ratio, so the deck rewrites its split's ratio 200 ms after
 the terminal stops changing. When you drag the divider yourself, the deck keeps your width until it
 closes. It always leaves at least 20 columns beside itself, and herdr keeps each side of a split
 between 10% and 90% of its width.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
