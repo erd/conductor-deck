@@ -3,6 +3,7 @@ name = "conductor-deck"
 description = "herdr plugin that shows conductor tasks as stacked cards"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 rust-version = "1.85"
 repository = "https://github.com/erd/conductor-deck"
 publish = false
