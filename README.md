@@ -69,6 +69,14 @@ The Rust toolchain is pinned in `rust-toolchain.toml` to match
 [erd/conductor](https://github.com/erd/conductor). CI runs `cargo fmt --check`,
 `cargo clippy -- -D warnings` and `cargo test`.
 
+### Releasing
+
+Run the **Create Release** workflow from the Actions tab. It uses
+[release-plz](https://release-plz.dev) to pick the next version from the conventional commits
+since the last `v*` tag (or takes the version you enter), and opens a PR that bumps the version in
+`Cargo.toml` and `herdr-plugin.toml`, `Cargo.lock` and `CHANGELOG.md`. Merging that PR tags
+`v<version>` and creates the GitHub release. `release-plz.toml` holds the config.
+
 ## Keybinding
 
 Bind the `toggle` action in `~/.config/herdr/config.toml`:
