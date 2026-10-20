@@ -1,0 +1,24 @@
+---
+source: src/ui/mod.rs
+expression: open
+---
+"  web               0   0   1   1 "
+"────────────────────────────────────────"
+" IN PROGRESS  1 ────────────────────── "
+"╭─ work-01 ────────────────────────────╮"
+"│   working                34m 56s │"
+"│ Fix the login redirect               │"
+"│  – ·  conductor/work-01            │"
+"╰──────────────────────────────────────╯"
+" TODO  1 ───────────────────────────── "
+"╭─ brief-02 ───────────────────────────╮"
+"│  briefed                    1h 34m │"
+"│ Brief the export job                 │"
+"│  – ·  conductor/brief-02           │"
+"╰──────────────────────────────────────╯"
+" DONE  2 ───────────────────────────  "
+"› merged-03 Rename the config … 1h 34m "
+"  merged-04 Bump dependencies   1h 34m "
+"                                        "
+"────────────────────────────────────────"
+" ⏎ focus · m msg · d decide · q quit 3/4"

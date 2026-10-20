@@ -118,6 +118,19 @@ the terminal stops changing. When you drag the divider yourself, the deck keeps 
 closes. It always leaves at least 20 columns beside itself, and herdr keeps each side of a split
 between 10% and 90% of its width.
 
+## Icons
+
+The deck draws with unicode symbols any monospace font has. With a [Nerd Font](https://www.nerdfonts.com)
+v3 as the terminal font, such as JetBrainsMono Nerd Font, set `deck_icons` in the same config,
+globally or for one repo:
+
+```toml
+deck_icons = "nerd"
+```
+
+Cards that are moving or need you then show their state as a pill, section headers become
+powerline segments, and the time in state, context, branch and PR get icons.
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).

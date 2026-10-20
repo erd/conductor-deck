@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use conductor_state::{Config, Home, Settings};
+use conductor_state::{Config, DeckIcons, Home, Settings};
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -85,16 +85,14 @@ fn deck() -> Result<(), BoxError> {
             let mut problem = recorded
                 .err()
                 .map(|err| format!("recording the deck pane: {err}"));
-            let deck_width = match settings {
-                Ok(settings) => settings.deck_width,
-                Err(err) => {
-                    problem = Some(err.to_string());
-                    Settings::default().deck_width
-                }
-            };
+            let settings = settings.unwrap_or_else(|err| {
+                problem = Some(err.to_string());
+                Settings::default()
+            });
             let deck = Deck::open(home, repo_id)?;
             App::new(&herdr, deck, name, tx, rx)?
-                .keep_width(deck_width, problem)
+                .with_icons(settings.deck_icons)
+                .keep_width(settings.deck_width, problem)
                 .run(&mut terminal)
         }
         Ok(Location::NoConductor { reason }) => {
@@ -121,6 +119,7 @@ fn show_until_quit(
             now: Timestamp::now(),
             show_hidden: false,
             fold_done: false,
+            icons: DeckIcons::default(),
             toast: None,
             input: None,
             decision: None,
@@ -207,6 +206,8 @@ struct App<'a> {
     selection: Selection,
     /// Whether the Done section is folded, with `z`.
     fold_done: bool,
+    /// The glyphs the deck draws with.
+    icons: DeckIcons,
     tx: Sender<AppEvent>,
     rx: mpsc::Receiver<AppEvent>,
     _watcher: TaskWatcher,
@@ -252,6 +253,7 @@ impl<'a> App<'a> {
             repo,
             selection: Selection::default(),
             fold_done: false,
+            icons: DeckIcons::default(),
             tx,
             rx,
             _watcher: watcher,
@@ -263,6 +265,11 @@ impl<'a> App<'a> {
             width: WidthKeeper::new(Settings::default().deck_width),
             width_due: None,
         })
+    }
+
+    fn with_icons(mut self, icons: DeckIcons) -> Self {
+        self.icons = icons;
+        self
     }
 
     /// Holds the deck at `columns` wide, starting now. `problem` is shown as a toast.
@@ -312,6 +319,7 @@ impl<'a> App<'a> {
                 now: self.deck.now(),
                 show_hidden: self.deck.show_hidden,
                 fold_done: self.fold_done,
+                icons: self.icons,
                 toast: self.toast.as_ref().map(|(text, _)| text.as_str()),
                 input: self.compose.as_ref().map(|compose| compose.input.text()),
                 decision: self.decision.as_ref(),
