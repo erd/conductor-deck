@@ -1,6 +1,8 @@
 //! One card: a bordered block titled with the task id, and the text helpers behind its lines.
 
-use conductor_state::{Activity, CheckState, Phase, PrState, ReviewDecision, StatusVerb};
+use conductor_state::{
+    Activity, CheckState, DeckIcons, Phase, PrState, ReviewDecision, StatusVerb,
+};
 use jiff::{SignedDuration, Timestamp};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -11,6 +13,7 @@ use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 use crate::deck::CardModel;
 use crate::deck::card::{Attention, State};
+use crate::ui::glyphs::{self, Glyphs};
 
 /// A state badge. The symbol carries the meaning; the color only backs it up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,26 +22,27 @@ pub struct Badge {
     pub style: Style,
 }
 
-pub fn badge(state: State) -> Badge {
+pub fn badge(state: State, icons: DeckIcons) -> Badge {
+    let glyphs = Glyphs::of(icons);
     let (symbol, style) = match state {
-        State::NeedsYou => ("⚑", Style::new().magenta().bold()),
-        State::Failed => ("✗", Style::new().red().bold()),
-        State::InProgress => ("◐", Style::new().yellow().bold()),
-        State::Review => ("◆", Style::new().cyan()),
-        State::ReadyToMerge => ("⇡", Style::new().blue()),
-        State::Pending => ("·", Style::new().dim()),
-        State::Done => ("✓", Style::new().green()),
+        State::NeedsYou => (glyphs.needs_you, Style::new().magenta().bold()),
+        State::Failed => (glyphs.failed, Style::new().red().bold()),
+        State::InProgress => (glyphs.in_progress, Style::new().yellow().bold()),
+        State::Review => (glyphs.review, Style::new().cyan()),
+        State::ReadyToMerge => (glyphs.ready_to_merge, Style::new().blue()),
+        State::Pending => (glyphs.pending, Style::new().dim()),
+        State::Done => (glyphs.done, Style::new().green()),
     };
     Badge { symbol, style }
 }
 
 /// The card's own badge: dim while its worker sits idle, and dim for tasks that ended
 /// without merging.
-fn card_badge(card: &CardModel) -> Badge {
-    let badge = badge(card.state);
+fn card_badge(card: &CardModel, icons: DeckIcons) -> Badge {
+    let badge = badge(card.state, icons);
     match (card.state, card.task.phase) {
         (State::Done, Phase::Abandoned) => Badge {
-            symbol: "✗",
+            symbol: Glyphs::of(icons).failed,
             style: Style::new().dim(),
         },
         (State::Done, Phase::TornDown) => Badge {
@@ -74,9 +78,16 @@ pub fn height(card: &CardModel, width: u16) -> u16 {
     3 + title + u16::from(has_context(card)) + u16::from(has_pr(card))
 }
 
-pub fn render(card: &CardModel, now: Timestamp, selected: bool, area: Rect, buf: &mut Buffer) {
+pub fn render(
+    card: &CardModel,
+    now: Timestamp,
+    selected: bool,
+    icons: DeckIcons,
+    area: Rect,
+    buf: &mut Buffer,
+) {
     if card.state == State::Done {
-        render_row(card, now, selected, area, buf);
+        render_row(card, now, selected, icons, area, buf);
         return;
     }
     let mut border = Style::new();
@@ -106,24 +117,31 @@ pub fn render(card: &CardModel, now: Timestamp, selected: bool, area: Rect, buf:
     } else {
         Style::new()
     };
-    let mut lines = vec![state_line(card, now, width)];
+    let mut lines = vec![state_line(card, now, icons, width)];
     lines.extend(
         wrap(&card.task.title, width, TITLE_LINES)
             .into_iter()
             .map(|line| Line::styled(line, title)),
     );
     if has_context(card) {
-        lines.push(context_line(card, width));
+        lines.push(context_line(card, icons, width));
     }
     if has_pr(card) {
-        lines.push(pr_line(card, width));
+        lines.push(pr_line(card, icons, width));
     }
     Paragraph::new(lines).block(block).render(area, buf);
 }
 
 /// A done task on one row: badge, id and title on the left, the time on the right.
-fn render_row(card: &CardModel, now: Timestamp, selected: bool, area: Rect, buf: &mut Buffer) {
-    let badge = card_badge(card);
+fn render_row(
+    card: &CardModel,
+    now: Timestamp,
+    selected: bool,
+    icons: DeckIcons,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let badge = card_badge(card, icons);
     let elapsed = elapsed(card.elapsed(now));
     let width = usize::from(area.width);
     let text = if selected {
@@ -151,13 +169,30 @@ fn render_row(card: &CardModel, now: Timestamp, selected: bool, area: Rect, buf:
 }
 
 /// The badge, the state word and what the worker is on, on the left, and the time in state on
-/// the right; the detail gives way first.
-fn state_line(card: &CardModel, now: Timestamp, width: usize) -> Line<'static> {
-    let badge = card_badge(card);
-    let elapsed = elapsed(card.elapsed(now));
+/// the right; the detail gives way first. With Nerd Font icons, a card that's moving or needs
+/// you wears its badge and state word as a pill.
+fn state_line(card: &CardModel, now: Timestamp, icons: DeckIcons, width: usize) -> Line<'static> {
+    let badge = card_badge(card, icons);
+    let elapsed = format!(
+        "{}{}",
+        Glyphs::of(icons).elapsed,
+        elapsed(card.elapsed(now))
+    );
     let room = width.saturating_sub(elapsed.width() + 1);
-    let text = format!("{} {}", badge.symbol, state_word(card));
-    let mut spans = vec![Span::styled(text, badge.style)];
+    let mut spans = if icons == DeckIcons::Nerd && pill(card) {
+        let cap = Style::new().fg(badge.style.fg.unwrap_or(Color::Reset));
+        vec![
+            Span::styled(glyphs::PILL_OPEN, cap),
+            Span::styled(
+                format!(" {} {}", badge.symbol, state_word(card)),
+                badge.style.reversed(),
+            ),
+            Span::styled(glyphs::PILL_CLOSE, cap),
+        ]
+    } else {
+        let text = format!("{} {}", badge.symbol, state_word(card));
+        vec![Span::styled(text, badge.style)]
+    };
     if let Some(detail) = detail(card) {
         spans.extend([Span::raw(" · ").dim(), Span::raw(detail)]);
     }
@@ -166,6 +201,15 @@ fn state_line(card: &CardModel, now: Timestamp, width: usize) -> Line<'static> {
     line.push_span(" ".repeat(gap));
     line.push_span(Span::raw(elapsed).dim());
     line
+}
+
+/// Whether the card is moving or needs you: live states, but not an idle worker.
+fn pill(card: &CardModel) -> bool {
+    match card.state {
+        State::NeedsYou | State::Failed | State::Review | State::ReadyToMerge => true,
+        State::InProgress => card.working(),
+        State::Pending | State::Done => false,
+    }
 }
 
 /// The state, in words, most pressing reason first.
@@ -244,27 +288,29 @@ fn has_context(card: &CardModel) -> bool {
 }
 
 /// `ctx 26% · <branch>`.
-fn context_line(card: &CardModel, width: usize) -> Line<'static> {
+fn context_line(card: &CardModel, icons: DeckIcons, width: usize) -> Line<'static> {
+    let glyphs = Glyphs::of(icons);
     let context = card
         .agent
         .as_ref()
         .and_then(|agent| agent.context.as_deref())
         .and_then(context_percent)
         .unwrap_or("–");
-    let mut spans = vec![Span::raw(format!("ctx {context}"))];
+    let mut spans = vec![Span::raw(format!("{}{context}", glyphs.context))];
     if let Some(branch) = &card.task.branch {
         spans.push(Span::raw(" · ").dim());
-        spans.push(Span::raw(branch.clone()));
+        spans.push(Span::raw(format!("{}{branch}", glyphs.branch)));
     }
     fit(spans, width)
 }
 
 /// `PR #123 ready · checks ✓ · approved`; the parts herdr or GitHub haven't reported are left out.
-fn pr_line(card: &CardModel, width: usize) -> Line<'static> {
+fn pr_line(card: &CardModel, icons: DeckIcons, width: usize) -> Line<'static> {
+    let glyphs = Glyphs::of(icons);
     let number = card.pr_url().and_then(pr_number);
     let mut spans = vec![Span::raw(match number {
-        Some(number) => format!("PR #{number}"),
-        None => "PR".to_owned(),
+        Some(number) => format!("{} #{number}", glyphs.pr),
+        None => glyphs.pr.to_owned(),
     })];
     let pr = card.live.pr;
     if let Some(pr) = pr {
@@ -279,8 +325,8 @@ fn pr_line(card: &CardModel, width: usize) -> Line<'static> {
     let separator = || Span::raw(" · ").dim();
     if let Some(checks) = pr.and_then(|pr| pr.checks) {
         let (symbol, style) = match checks {
-            CheckState::Pass => ("✓", Style::new().fg(Color::Green)),
-            CheckState::Fail => ("✗", Style::new().fg(Color::Red).bold()),
+            CheckState::Pass => (glyphs.done, Style::new().fg(Color::Green)),
+            CheckState::Fail => (glyphs.failed, Style::new().fg(Color::Red).bold()),
             CheckState::Pending => ("…", Style::new().dim()),
         };
         spans.extend([
@@ -505,10 +551,12 @@ mod tests {
             State::Pending,
             State::Done,
         ];
-        for state in states {
-            let symbol = badge(state).symbol;
-            assert_eq!(symbol.width(), 1, "{state:?}");
-            assert!(!symbol.trim().is_empty(), "{state:?}");
+        for icons in [DeckIcons::Unicode, DeckIcons::Nerd] {
+            for state in states {
+                let symbol = badge(state, icons).symbol;
+                assert_eq!(symbol.width(), 1, "{state:?} {icons:?}");
+                assert!(!symbol.trim().is_empty(), "{state:?} {icons:?}");
+            }
         }
     }
 }

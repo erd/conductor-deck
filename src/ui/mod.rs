@@ -3,15 +3,17 @@
 
 mod card;
 mod decision;
+mod glyphs;
 mod input;
 mod list;
 
+use conductor_state::DeckIcons;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use jiff::Timestamp;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
-use ratatui::style::{Style, Stylize as _};
+use ratatui::style::{Color, Style, Stylize as _};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget as _, Wrap};
 use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
@@ -19,6 +21,7 @@ use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 use crate::deck::CardModel;
 use crate::deck::card::{Section, State};
 pub use decision::{Answer, DecisionModal, Outcome as DecisionOutcome};
+use glyphs::Glyphs;
 pub use input::{Input, Outcome as InputOutcome};
 pub use list::Selection;
 
@@ -33,6 +36,8 @@ pub struct View<'a> {
     pub show_hidden: bool,
     /// Whether the Done section is folded to its rule.
     pub fold_done: bool,
+    /// The glyphs to draw with.
+    pub icons: DeckIcons,
     /// A transient message above the footer.
     pub toast: Option<&'a str>,
     /// The message being typed, which replaces the footer while `m` is open.
@@ -123,9 +128,7 @@ pub fn draw(frame: &mut Frame, view: &View, selection: &mut Selection) {
             draw_message(Line::from("no tasks").dim(), "", body, buf);
             None
         }
-        Body::Cards { cards, .. } => {
-            draw_cards(cards, view.fold_done, view.now, selection, body, buf)
-        }
+        Body::Cards { cards, .. } => draw_cards(cards, view, selection, body, buf),
     };
     let modal_cursor = view
         .decision
@@ -157,8 +160,10 @@ pub fn draw(frame: &mut Frame, view: &View, selection: &mut Selection) {
 }
 
 /// The repo name on the left and, with cards, how many are in each open section on the right,
-/// over a heavy rule.
+/// over a heavy rule. With Nerd Font icons the name sits in a powerline segment over a light
+/// rule.
 fn draw_header(view: &View, area: Rect, buf: &mut Buffer) {
+    let nerd = view.icons == DeckIcons::Nerd;
     let [top, rule] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
     let counts = match view.body {
         Body::Cards { cards, .. } => {
@@ -169,12 +174,14 @@ fn draw_header(view: &View, area: Rect, buf: &mut Buffer) {
                 (Section::InProgress, State::InProgress),
                 (Section::Todo, State::Pending),
             ] {
-                let badge = card::badge(state);
+                let badge = card::badge(state, view.icons);
                 let count = cards.iter().filter(|c| c.section() == section).count();
-                spans.push(Span::styled(
-                    format!("{}{count} ", badge.symbol),
-                    badge.style,
-                ));
+                let text = if nerd {
+                    format!(" {} {count} ", badge.symbol)
+                } else {
+                    format!("{}{count} ", badge.symbol)
+                };
+                spans.push(Span::styled(text, badge.style));
             }
             Line::from(spans)
         }
@@ -184,15 +191,32 @@ fn draw_header(view: &View, area: Rect, buf: &mut Buffer) {
     let [name, right] =
         Layout::horizontal([Constraint::Fill(1), Constraint::Length(counts_width)]).areas(top);
     let repo = view.repo.unwrap_or("conductor");
-    let label = " TASKS · ";
-    let room = usize::from(name.width).saturating_sub(label.width() + 1);
-    Line::from(format!("{label}{}", card::truncate(repo, room)))
-        .bold()
+    if nerd {
+        let icon = format!(" {} ", glyphs::TERMINAL);
+        // The segment's padding and its end.
+        let room = usize::from(name.width).saturating_sub(icon.width() + 3);
+        Line::from(vec![
+            Span::raw(format!("{icon}{} ", card::truncate(repo, room)))
+                .reversed()
+                .bold(),
+            Span::raw(glyphs::SEGMENT_END),
+        ])
         .render(name, buf);
+    } else {
+        let label = " TASKS · ";
+        let room = usize::from(name.width).saturating_sub(label.width() + 1);
+        Line::from(format!("{label}{}", card::truncate(repo, room)))
+            .bold()
+            .render(name, buf);
+    }
     counts.render(right, buf);
-    Line::from("━".repeat(usize::from(rule.width)))
-        .bold()
-        .render(rule, buf);
+    if nerd {
+        Line::from("─".repeat(usize::from(rule.width))).render(rule, buf);
+    } else {
+        Line::from("━".repeat(usize::from(rule.width)))
+            .bold()
+            .render(rule, buf);
+    }
 }
 
 /// A state with no cards: a title, and a dim explanation wrapped below it.
@@ -224,16 +248,16 @@ pub fn shown(cards: &[CardModel], fold_done: bool) -> &[CardModel] {
 /// returns the selected card's index.
 fn draw_cards(
     all: &[CardModel],
-    fold_done: bool,
-    now: Timestamp,
+    view: &View,
     selection: &mut Selection,
     area: Rect,
     buf: &mut Buffer,
 ) -> Option<usize> {
-    let cards = shown(all, fold_done);
+    let cards = shown(all, view.fold_done);
     let count = |section| all.iter().filter(|card| card.section() == section).count();
     let folded = cards.len() < all.len();
-    let rule = |section: Section| section_rule(section, count(section), folded, area.width);
+    let rule =
+        |section: Section| section_rule(section, count(section), folded, view.icons, area.width);
     let starts_section =
         |index: usize| index == 0 || cards[index - 1].section() != cards[index].section();
     let last = cards.len().checked_sub(1);
@@ -268,7 +292,7 @@ fn draw_cards(
             break;
         }
         let rect = Rect { y, height, ..area };
-        card::render(card, now, index == selected, rect, buf);
+        card::render(card, view.now, index == selected, view.icons, rect, buf);
         selection.drew(y..y + height, index);
         y += height;
         if folded && Some(index) == last && y < area.bottom() {
@@ -280,7 +304,13 @@ fn draw_cards(
 }
 
 /// ` IN PROGRESS ───── 2`, with `▾` or `▸` after Done's count.
-fn section_rule(section: Section, count: usize, folded: bool, width: u16) -> Line<'static> {
+fn section_rule(
+    section: Section,
+    count: usize,
+    folded: bool,
+    icons: DeckIcons,
+    width: u16,
+) -> Line<'static> {
     let label = match section {
         Section::NeedsYou => "NEEDS YOU",
         Section::InProgress => "IN PROGRESS",
@@ -288,14 +318,18 @@ fn section_rule(section: Section, count: usize, folded: bool, width: u16) -> Lin
         Section::Todo => "TODO",
         Section::Done => "DONE",
     };
+    let glyphs = Glyphs::of(icons);
+    if icons == DeckIcons::Nerd {
+        return section_segment(section, label, count, folded, glyphs, width);
+    }
     let label_style = if section == Section::NeedsYou {
         Style::new().magenta().bold()
     } else {
         Style::new().dim()
     };
     let tail = match section {
-        Section::Done if folded => format!(" {count} ▸ "),
-        Section::Done => format!(" {count} ▾ "),
+        Section::Done if folded => format!(" {count} {} ", glyphs.folded),
+        Section::Done => format!(" {count} {} ", glyphs.unfolded),
         _ => format!(" {count} "),
     };
     let rule = usize::from(width).saturating_sub(label.width() + tail.width() + 2);
@@ -305,6 +339,41 @@ fn section_rule(section: Section, count: usize, folded: bool, width: u16) -> Lin
         Span::raw(" ").dim(),
         Span::raw("─".repeat(rule)).dim(),
         Span::raw(tail).dim(),
+    ]);
+    card::fit(line.spans, usize::from(width))
+}
+
+/// ` IN PROGRESS  2 ─────` as a powerline segment, with a chevron after Done's rule.
+fn section_segment(
+    section: Section,
+    label: &str,
+    count: usize,
+    folded: bool,
+    glyphs: &Glyphs,
+    width: u16,
+) -> Line<'static> {
+    let color = if section == Section::NeedsYou {
+        Color::Magenta
+    } else {
+        Color::DarkGray
+    };
+    let mut segment = Style::new().bg(color).bold();
+    if section == Section::NeedsYou {
+        segment = segment.fg(Color::Black);
+    }
+    let head = format!(" {count} ");
+    let tail = match section {
+        Section::Done if folded => format!(" {} ", glyphs.folded),
+        Section::Done => format!(" {} ", glyphs.unfolded),
+        _ => " ".to_owned(),
+    };
+    let rule = usize::from(width).saturating_sub(label.width() + head.width() + tail.width() + 3);
+    let line = Line::from(vec![
+        Span::styled(format!(" {label} "), segment),
+        Span::styled(glyphs::SEGMENT_END, Style::new().fg(color)),
+        Span::raw(head),
+        Span::raw("─".repeat(rule)),
+        Span::raw(tail),
     ]);
     card::fit(line.spans, usize::from(width))
 }
@@ -455,6 +524,9 @@ mod tests {
 
     const NOW: &str = "12:34:56";
 
+    /// Each set of glyphs, and the suffix its snapshots take.
+    const ICONS: [(DeckIcons, &str); 2] = [(DeckIcons::Unicode, ""), (DeckIcons::Nerd, "_nerd")];
+
     fn render(width: u16, height: u16, view: &View, selection: &mut Selection) -> TestBackend {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| draw(frame, view, selection)).unwrap();
@@ -468,6 +540,7 @@ mod tests {
             now: ts(NOW),
             show_hidden: false,
             fold_done: false,
+            icons: DeckIcons::Unicode,
             toast: None,
             input: None,
             decision: None,
@@ -569,14 +642,15 @@ mod tests {
     #[test]
     fn one_card_per_phase() {
         let cards = every_phase();
-        for width in [40, 60] {
-            let backend = render(
-                width,
-                64,
-                &cards_view(&cards, None),
-                &mut Selection::default(),
-            );
-            assert_snapshot!(format!("one_card_per_phase_{width}"), backend);
+        for (icons, suffix) in ICONS {
+            for width in [40, 60] {
+                let view = View {
+                    icons,
+                    ..cards_view(&cards, None)
+                };
+                let backend = render(width, 64, &view, &mut Selection::default());
+                assert_snapshot!(format!("one_card_per_phase{suffix}_{width}"), backend);
+            }
         }
     }
 
@@ -608,27 +682,32 @@ mod tests {
         add(&repo, "merged-04", Phase::Merged, "Bump dependencies", &[]);
         let cards = cards(&repo);
         let ids: Vec<&str> = cards.iter().map(|card| card.task.id.as_str()).collect();
-        for width in [40, 60] {
-            // Done open, with a done row selected.
-            let mut selection = Selection::default();
-            selection.move_by(&ids, 2);
-            let view = cards_view(&cards, None);
-            let open = render(width, 20, &view, &mut selection);
-            assert_snapshot!(format!("sections_done_open_{width}"), open);
+        for (icons, suffix) in ICONS {
+            for width in [40, 60] {
+                // Done open, with a done row selected.
+                let mut selection = Selection::default();
+                selection.move_by(&ids, 2);
+                let view = View {
+                    icons,
+                    ..cards_view(&cards, None)
+                };
+                let open = render(width, 20, &view, &mut selection);
+                assert_snapshot!(format!("sections_done_open{suffix}_{width}"), open);
 
-            // Folded, the selection falls back to the last card still shown.
-            let folded = View {
-                fold_done: true,
-                ..view
-            };
-            let shown: Vec<&str> = shown(&cards, true)
-                .iter()
-                .map(|card| card.task.id.as_str())
-                .collect();
-            assert_eq!(shown, ["work-01", "brief-02"]);
-            assert_eq!(selection.resolve(&shown), Some(1));
-            let backend = render(width, 20, &folded, &mut selection);
-            assert_snapshot!(format!("sections_done_folded_{width}"), backend);
+                // Folded, the selection falls back to the last card still shown.
+                let folded = View {
+                    fold_done: true,
+                    ..view
+                };
+                let shown: Vec<&str> = shown(&cards, true)
+                    .iter()
+                    .map(|card| card.task.id.as_str())
+                    .collect();
+                assert_eq!(shown, ["work-01", "brief-02"]);
+                assert_eq!(selection.resolve(&shown), Some(1));
+                let backend = render(width, 20, &folded, &mut selection);
+                assert_snapshot!(format!("sections_done_folded{suffix}_{width}"), backend);
+            }
         }
         // Only done cards, folded: just the rule.
         let done = &cards[2..];
@@ -659,14 +738,18 @@ mod tests {
         repo.write_task(&pr);
         repo.append("pr-02", &fixture("pr_lifecycle.jsonl")[..7]);
         let cards = cards(&repo);
-        for width in [40, 60] {
-            let backend = render(
-                width,
-                14,
-                &cards_view(&cards, None),
-                &mut Selection::default(),
-            );
-            assert_snapshot!(format!("needs_permission_and_pr_line_{width}"), backend);
+        for (icons, suffix) in ICONS {
+            for width in [40, 60] {
+                let view = View {
+                    icons,
+                    ..cards_view(&cards, None)
+                };
+                let backend = render(width, 14, &view, &mut Selection::default());
+                assert_snapshot!(
+                    format!("needs_permission_and_pr_line{suffix}_{width}"),
+                    backend
+                );
+            }
         }
     }
 
@@ -680,6 +763,7 @@ mod tests {
             now: ts(NOW),
             show_hidden: false,
             fold_done: false,
+            icons: DeckIcons::Unicode,
             toast: None,
             input: None,
             decision: None,
