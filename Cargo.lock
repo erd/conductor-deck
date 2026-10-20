@@ -83,8 +83,8 @@ dependencies = [
 
 [[package]]
 name = "conductor-state"
-version = "0.1.0"
-source = "git+https://github.com/erd/conductor?branch=erd%2Fdeck-icons#ad72cc78219c291a1411d6c66ed357fd49a50328"
+version = "0.2.0"
+source = "git+https://github.com/erd/conductor?tag=v0.2.0#d71dbdd424cf9bc3fd7d217bae2d7d9d7b0a9251"
 dependencies = [
  "jiff",
  "schemars",
