@@ -84,7 +84,7 @@ dependencies = [
 [[package]]
 name = "conductor-state"
 version = "0.1.0"
-source = "git+https://github.com/erd/conductor?tag=state-v0.2.0#f1888d8cfae1187f0973b14f78cf24ffb91d3664"
+source = "git+https://github.com/erd/conductor?tag=v0.1.0#aec01c2b771f5f1dc567dcfd0308fd72e9f3366d"
 dependencies = [
  "jiff",
  "schemars",
