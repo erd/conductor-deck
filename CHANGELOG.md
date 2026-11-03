@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/erd/conductor-deck/compare/v0.2.0...v0.3.0) - 2026-11-03
+
+### Added
+
+- Open the decision modal as a centered herdr popup ([#26](https://github.com/erd/conductor-deck/pull/26))
+
 ## [0.2.0](https://github.com/erd/conductor-deck/compare/v0.1.0...v0.2.0) - 2026-10-20
 
 ### Added
