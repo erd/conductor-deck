@@ -13,6 +13,9 @@ pub enum HerdrError {
     /// herdr refuses to prompt an agent that is waiting on its own question.
     #[error("agent is blocked: {0}")]
     AgentBlocked(String),
+    /// herdr can't open a popup while Settings, copy mode or another modal is open.
+    #[error("herdr is busy: {0}")]
+    UiBusy(String),
     #[error("{code}: {message}")]
     NotFound { code: String, message: String },
     /// The subscription fell behind herdr's retained history; cached state is stale.
@@ -28,6 +31,7 @@ impl HerdrError {
         match code.as_str() {
             "agent_blocked" => Self::AgentBlocked(message),
             "events_lost" => Self::EventsLost,
+            "ui_busy" => Self::UiBusy(message),
             "not_found" | "agent_not_found" | "pane_not_found" | "split_not_found" => {
                 Self::NotFound { code, message }
             }
@@ -58,6 +62,7 @@ mod tests {
     fn maps_codes_to_variants() {
         assert!(matches!(map("agent_blocked"), HerdrError::AgentBlocked(m) if m == "msg"));
         assert!(matches!(map("events_lost"), HerdrError::EventsLost));
+        assert!(matches!(map("ui_busy"), HerdrError::UiBusy(m) if m == "msg"));
         for code in [
             "not_found",
             "agent_not_found",

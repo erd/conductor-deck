@@ -1,4 +1,5 @@
 mod actions;
+mod decide;
 mod deck;
 mod dock;
 mod herdr;
@@ -45,6 +46,7 @@ fn main() -> ExitCode {
             .and_then(|client| probe(&client))
             .map_err(BoxError::from),
         Some("toggle") => run_toggle(),
+        Some("decide") => run_decide(),
         _ => deck(),
     };
     match result {
@@ -63,6 +65,30 @@ fn run_toggle() -> Result<(), BoxError> {
     let target = toggle::invoked_from()?;
     toggle::toggle(&herdr, &panes, &target)?;
     Ok(())
+}
+
+/// The `decide` popup that `d` opens: answers one task's decisions, then exits to close.
+fn run_decide() -> Result<(), BoxError> {
+    let request = decide::Request::from_env()?;
+    let herdr = SocketClient::from_env()?;
+    let home = Home::resolve()?;
+    let deck = Deck::open(home, request.repo_id.clone())?;
+    let card = deck.card(&request.task_id);
+    let mut popup = decide::Popup::new(request, card);
+    let bin = actions::conductor_bin();
+    install_panic_hook();
+    let _guard = TerminalGuard::enter()?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    loop {
+        terminal.draw(|frame| ui::draw_popup(frame, popup.modal(), popup.message()))?;
+        // Anything else, such as a resize, just redraws.
+        if let Event::Key(key) = event::read()? {
+            let step = popup.handle(&key, &herdr, actions::run_conductor, bin.as_deref());
+            if step == decide::Step::Exit {
+                return Ok(());
+            }
+        }
+    }
 }
 
 fn deck() -> Result<(), BoxError> {
@@ -395,20 +421,17 @@ impl<'a> App<'a> {
                     DecisionOutcome::Open => {}
                     DecisionOutcome::Cancel => self.decision = None,
                     DecisionOutcome::Submit(answer) => {
-                        let toast = match actions::conductor_bin() {
-                            Some(bin) => Some(actions::answer_decision(
-                                self.herdr,
-                                actions::run_conductor,
-                                &bin,
-                                self.deck.repo_id(),
-                                modal.task_id(),
-                                modal.pane(),
-                                &answer,
-                            )),
-                            None => Some("set CONDUCTOR_BIN or HOME to find conductor".to_owned()),
-                        };
+                        let answered = actions::submit_answer(
+                            self.herdr,
+                            actions::run_conductor,
+                            actions::conductor_bin().as_deref(),
+                            self.deck.repo_id(),
+                            modal.task_id(),
+                            modal.pane(),
+                            &answer,
+                        );
                         self.decision = None;
-                        self.show(toast);
+                        self.show(Some(answered.message().to_owned()));
                     }
                 }
             }
@@ -471,12 +494,10 @@ impl<'a> App<'a> {
                 }
                 Err(toast) => Some(toast),
             }),
-            Action::Decide => selected.and_then(|card| match actions::start_decision(card) {
-                Ok(modal) => {
-                    self.decision = Some(modal);
-                    None
-                }
-                Err(toast) => Some(toast),
+            Action::Decide => selected.and_then(|card| {
+                let (modal, toast) = actions::decide(self.herdr, card, self.deck.repo_id());
+                self.decision = modal;
+                toast
             }),
             Action::OpenPr => {
                 selected.and_then(|card| actions::open_pr(card, actions::launch_browser))

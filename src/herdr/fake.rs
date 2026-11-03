@@ -28,6 +28,11 @@ pub enum Action {
         entrypoint: String,
         beside: String,
     },
+    OpenPopup {
+        plugin: String,
+        entrypoint: String,
+        env: Vec<(String, String)>,
+    },
     FocusPluginPane(String),
     ClosePluginPane(String),
 }
@@ -46,6 +51,7 @@ pub struct FakeHerdr {
     actions: Mutex<Vec<Action>>,
     blocked: Mutex<HashSet<String>>,
     gone: Mutex<HashSet<String>>,
+    busy: Mutex<bool>,
     subscribers: Mutex<Vec<Sender<HerdrEvent>>>,
 }
 
@@ -62,6 +68,7 @@ impl FakeHerdr {
             actions: Mutex::default(),
             blocked: Mutex::default(),
             gone: Mutex::default(),
+            busy: Mutex::default(),
             subscribers: Mutex::default(),
         }
     }
@@ -75,6 +82,11 @@ impl FakeHerdr {
     /// has closed.
     pub fn close(&self, pane: &str) {
         lock(&self.gone).insert(pane.to_owned());
+    }
+
+    /// Makes popups fail with `UiBusy`, as herdr does while another modal is open.
+    pub fn busy(&self) {
+        *lock(&self.busy) = true;
     }
 
     pub fn actions(&self) -> Vec<Action> {
@@ -252,6 +264,23 @@ impl HerdrClient for FakeHerdr {
             ..target
         });
         Ok(pane_id)
+    }
+
+    fn plugin_popup_open(
+        &self,
+        plugin: &str,
+        entrypoint: &str,
+        env: &[(String, String)],
+    ) -> Result<()> {
+        if *lock(&self.busy) {
+            return Err(HerdrError::UiBusy("a popup pane is already open".into()));
+        }
+        self.record(Action::OpenPopup {
+            plugin: plugin.to_owned(),
+            entrypoint: entrypoint.to_owned(),
+            env: env.to_vec(),
+        });
+        Ok(())
     }
 
     fn plugin_pane_focus(&self, pane: &str) -> Result<()> {

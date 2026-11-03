@@ -7,7 +7,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Style, Stylize as _};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Widget as _, Wrap};
-use unicode_width::UnicodeWidthStr as _;
+use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 use super::card;
 use super::input::Input;
@@ -218,10 +218,9 @@ pub fn render(modal: &DecisionModal, area: Rect, buf: &mut Buffer) -> Option<Pos
 
     let mut lines = vec![Line::from(decision.title.clone()).bold()];
     lines.extend(
-        decision
-            .about
-            .lines()
-            .map(|line| Line::from(line.to_owned()).dim()),
+        (decision.about.lines())
+            .flat_map(|line| wrap_hanging(line, width))
+            .map(|line| Line::from(line).dim()),
     );
     lines.push(Line::default());
     for (index, option) in decision.options.iter().enumerate() {
@@ -277,6 +276,53 @@ pub fn render(modal: &DecisionModal, area: Rect, buf: &mut Buffer) -> Option<Pos
     };
     let cursor = super::draw_input(prompt, modal.note.text(), note, buf);
     modal.typing().then_some(cursor)
+}
+
+/// Wraps a `- ` bullet at `width` columns on spaces, indenting continuation lines under the
+/// bullet's text. Other lines, and bullets too narrow to indent, are left for the paragraph to
+/// wrap.
+fn wrap_hanging(line: &str, width: usize) -> Vec<String> {
+    /// The fewest columns of text worth indenting for.
+    const MIN_TEXT: usize = 8;
+    let text = line.trim_start();
+    let lead = &line[..line.len() - text.len()];
+    let Some(text) = text.strip_prefix("- ") else {
+        return vec![line.to_owned()];
+    };
+    let indent = lead.width() + 2;
+    let Some(room) = width.checked_sub(indent).filter(|room| *room >= MIN_TEXT) else {
+        return vec![line.to_owned()];
+    };
+    let mut rows = vec![String::new()];
+    let mut used = 0;
+    for word in text.split_whitespace() {
+        let row = rows.last_mut().expect("never empty");
+        if used > 0 && used + 1 + word.width() <= room {
+            row.push(' ');
+            used += 1;
+        } else if used > 0 {
+            rows.push(String::new());
+            used = 0;
+        }
+        // A word longer than a whole row is broken where it reaches the edge.
+        for c in word.chars() {
+            let columns = c.width().unwrap_or(0);
+            if used > 0 && used + columns > room {
+                rows.push(String::new());
+                used = 0;
+            }
+            rows.last_mut().expect("never empty").push(c);
+            used += columns;
+        }
+    }
+    let hang = " ".repeat(indent);
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, row)| match index {
+            0 => format!("{lead}- {row}"),
+            _ => format!("{hang}{row}"),
+        })
+        .collect()
 }
 
 /// `› label` with `REC` at the right edge when recommended.
@@ -341,6 +387,29 @@ mod tests {
             label: label.into(),
             note: note.map(Into::into),
         })
+    }
+
+    #[test]
+    fn bullets_wrap_under_their_text() {
+        assert_eq!(
+            wrap_hanging("- one two three four five", 16),
+            ["- one two three", "  four five"]
+        );
+        // A nested bullet hangs under its own text; a long word breaks at the edge.
+        assert_eq!(
+            wrap_hanging("  - abcdefghijklmnop qr", 14),
+            ["  - abcdefghij", "    klmnop qr"]
+        );
+        // Wide characters count two columns.
+        assert_eq!(
+            wrap_hanging("- 日本語の テキスト", 12),
+            ["- 日本語の", "  テキスト"]
+        );
+        // Plain lines, and bullets with no room to indent, are left to the paragraph.
+        let plain = "Sessions expire mid-checkout and the redirect loops.";
+        assert_eq!(wrap_hanging(plain, 16), [plain]);
+        assert_eq!(wrap_hanging("- one two three", 9), ["- one two three"]);
+        assert_eq!(wrap_hanging("- ", 16), ["- "]);
     }
 
     #[test]
