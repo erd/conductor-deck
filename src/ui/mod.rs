@@ -159,6 +159,49 @@ pub fn draw(frame: &mut Frame, view: &View, selection: &mut Selection) {
     }
 }
 
+/// The `decide` popup: the modal at the top, `message` wrapped above the last row, and the
+/// modal's keys on the last row. Without a modal, the message shows at the top.
+pub fn draw_popup(frame: &mut Frame, modal: Option<&DecisionModal>, message: Option<&str>) {
+    let area = frame.area();
+    let message = message.map(|text| {
+        Paragraph::new(text.to_owned())
+            .yellow()
+            .wrap(Wrap { trim: true })
+    });
+    let message_height = message.as_ref().map_or(0, |message| {
+        u16::try_from(message.line_count(area.width)).unwrap_or(u16::MAX)
+    });
+    // Under the modal, or at the top without one.
+    let [body, message_area, footer] = if modal.is_some() {
+        Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(message_height),
+            Constraint::Length(1),
+        ])
+        .areas(area)
+    } else {
+        let [message_area, body, footer] = Layout::vertical([
+            Constraint::Length(message_height),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        [body, message_area, footer]
+    };
+    let buf = frame.buffer_mut();
+    let cursor = modal.and_then(|modal| decision::render(modal, body, buf));
+    if let Some(message) = message {
+        message.render(message_area, buf);
+    }
+    let hints = modal.map_or_else(|| "any key closes".to_owned(), decision_hints);
+    card::fit(vec![Span::raw(hints)], usize::from(footer.width))
+        .dim()
+        .render(footer, buf);
+    if let Some(cursor) = cursor {
+        frame.set_cursor_position(cursor);
+    }
+}
+
 /// The repo name on the left and, with cards, how many are in each open section on the right,
 /// over a heavy rule. With Nerd Font icons the name sits in a powerline segment over a light
 /// rule.
@@ -942,6 +985,95 @@ mod tests {
             let backend = render(width, 20, &view, &mut Selection::default());
             assert_snapshot!(format!("decision_modal_choosing_{width}"), backend);
         }
+    }
+
+    /// A decision with a long title, and about text with bullets that wrap.
+    fn rollout() -> Decision {
+        let mut rollout = decision(
+            "rollout",
+            &[
+                (
+                    "flag",
+                    "Behind a feature flag",
+                    Some("ship dark, then turn it on per tenant once the dashboards look right"),
+                ),
+                (
+                    "all",
+                    "Everyone at once",
+                    Some("simplest, but no way back short of a revert"),
+                ),
+            ],
+        );
+        rollout.title =
+            "How should the new session refresh reach users without logging anyone out?".into();
+        rollout.about = [
+            "The refresh rewrites every session cookie on first use.",
+            "- Old clients keep the previous cookie until they reload the page, so both shapes must be accepted for a while",
+            "- Rolling back after the rewrite logs out everyone who was refreshed",
+        ]
+        .join("\n");
+        rollout.recommend = Some("flag".into());
+        rollout
+    }
+
+    fn render_popup(
+        width: u16,
+        height: u16,
+        modal: Option<&DecisionModal>,
+        message: Option<&str>,
+    ) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| draw_popup(frame, modal, message))
+            .unwrap();
+        terminal
+    }
+
+    #[test]
+    fn decision_popup() {
+        // 70% of a 128-column terminal, inside herdr's popup border.
+        let other = decision("db-engine", &[("pg", "Postgres", None)]);
+        let modal =
+            DecisionModal::new("fix-login-07".into(), None, vec![rollout(), other]).unwrap();
+        let terminal = render_popup(86, 24, Some(&modal), None);
+        assert_snapshot!("decision_popup_86", terminal.backend().clone());
+
+        let failed = render_popup(
+            86,
+            24,
+            Some(&modal),
+            Some("answer failed: Error: decision `rollout` was already answered: `all` by user"),
+        );
+        assert_snapshot!("decision_popup_failed_86", failed.backend().clone());
+
+        let empty = render_popup(86, 8, None, Some("fix-login-07: no open decisions"));
+        assert_snapshot!("decision_popup_empty_86", empty.backend().clone());
+    }
+
+    #[test]
+    fn decision_popup_cursor_follows_the_note() {
+        let mut modal = DecisionModal::new("fix-login-07".into(), None, vec![rollout()]).unwrap();
+        press(&mut modal, KeyCode::Tab);
+        for c in "per tenant".chars() {
+            press(&mut modal, KeyCode::Char(c));
+        }
+        let mut terminal = render_popup(86, 24, Some(&modal), None);
+        let cursor = terminal.get_cursor_position().unwrap();
+        let note_x = u16::try_from(1 + "note › per tenant".width()).unwrap();
+        assert_eq!(cursor.x, note_x);
+        assert_eq!(terminal.backend().buffer()[(0, cursor.y + 1)].symbol(), "┗");
+    }
+
+    #[test]
+    fn decision_about_bullets() {
+        let cards = every_phase();
+        let modal = DecisionModal::new("fix-login-07".into(), None, vec![rollout()]).unwrap();
+        let view = View {
+            decision: Some(&modal),
+            ..cards_view(&cards, None)
+        };
+        let backend = render(40, 30, &view, &mut Selection::default());
+        assert_snapshot!("decision_about_bullets_40", backend);
     }
 
     #[test]

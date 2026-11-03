@@ -43,15 +43,19 @@ The UI snapshot tests use [insta](https://insta.rs). After a deliberate change t
 | `j`/`k`, `↓`/`↑`, mouse wheel | Move the selection |
 | `Enter`, click | Jump to the card's worker |
 | `m` | Message the card's worker: type a line, `Enter` sends, `Esc` cancels |
-| `d` | Answer the card's open decisions, oldest first (see below) |
+| `d` | Answer the card's open decisions, oldest first, in a popup (see below) |
 | `o` | Open the card's PR in the browser |
 | `c` | Jump to the conductor |
 | `z` | Fold or unfold the Done section |
 | `L` | Show or hide torn-down and abandoned tasks |
 | `q`, Ctrl-C | Close the deck |
 
-In the decision modal, `↑`/`↓` (or `j`/`k`) choose an option, `Tab` moves to the note, `n`/`p`
-show the next or previous open decision, `Enter` answers and `Esc` cancels. A decision that allows
+`d` opens the decision modal in a popup centered over herdr, 70% of the window wide and tall. If
+herdr can't open it because Settings, copy mode or another popup is open, the modal opens inside the
+deck instead. In the modal, `↑`/`↓` (or `j`/`k`) choose an option, `Tab` moves to the note, `n`/`p`
+show the next or previous open decision, `Enter` answers and `Esc` cancels. The popup closes once
+the answer is recorded, or on `Esc` without changes; if the answer fails, it stays open and says
+why. A decision that allows
 free text has a last `other…` row, which answers with what's typed in the note. The deck records the
 answer with `conductor decision answer … --by deck`, then prompts the worker to continue. It runs
 `CONDUCTOR_BIN` if set, else `~/.cargo/bin/conductor`, since plugin panes start with a minimal

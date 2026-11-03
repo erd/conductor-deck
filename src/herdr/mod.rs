@@ -39,6 +39,14 @@ pub trait HerdrClient {
     /// Opens `plugin`'s `entrypoint` pane in a split to the right of `beside`, without focusing
     /// it. Returns the new pane's id.
     fn plugin_pane_open(&self, plugin: &str, entrypoint: &str, beside: &str) -> Result<String>;
+    /// Opens `plugin`'s `entrypoint` as a popup centered over herdr, with `env` added to its
+    /// environment. Fails with [`HerdrError::UiBusy`] while herdr shows another modal.
+    fn plugin_popup_open(
+        &self,
+        plugin: &str,
+        entrypoint: &str,
+        env: &[(String, String)],
+    ) -> Result<()>;
     fn plugin_pane_focus(&self, pane: &str) -> Result<()>;
     fn plugin_pane_close(&self, pane: &str) -> Result<()>;
     /// Streams pane, layout and workspace events, plus agent status changes for `watch_panes`

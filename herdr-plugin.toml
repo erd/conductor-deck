@@ -17,6 +17,16 @@ title = "conductor"
 placement = "split"
 command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/conductor-deck\""]
 
+# `d` opens a card's decisions here: a popup centered over herdr, which closes when the command
+# exits. The deck passes the task through the env, since a popup gets no HERDR_PANE_ID.
+[[panes]]
+id = "decide"
+title = "decision"
+placement = "popup"
+width = "70%"
+height = "70%"
+command = ["/bin/sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/conductor-deck\" decide"]
+
 [[actions]]
 id = "toggle"
 title = "Toggle conductor deck"

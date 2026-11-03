@@ -1,0 +1,13 @@
+---
+source: src/ui/mod.rs
+assertion_line: 1046
+expression: empty.backend().clone()
+---
+"fix-login-07: no open decisions                                                       "
+"                                                                                      "
+"                                                                                      "
+"                                                                                      "
+"                                                                                      "
+"                                                                                      "
+"                                                                                      "
+"any key closes                                                                        "

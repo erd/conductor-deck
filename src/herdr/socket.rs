@@ -138,6 +138,27 @@ impl HerdrClient for SocketClient {
         Ok(opened.pane.pane_id)
     }
 
+    fn plugin_popup_open(
+        &self,
+        plugin: &str,
+        entrypoint: &str,
+        env: &[(String, String)],
+    ) -> Result<()> {
+        let env: serde_json::Map<String, Value> = env
+            .iter()
+            .map(|(name, value)| (name.clone(), Value::from(value.as_str())))
+            .collect();
+        let params = json!({
+            "plugin_id": plugin,
+            "entrypoint": entrypoint,
+            "placement": "popup",
+            "env": env,
+        });
+        // herdr 0.9.5 answers `ok`, with no pane: a popup isn't a pane.
+        self.conn.request("plugin.pane.open", &params)?;
+        Ok(())
+    }
+
     fn plugin_pane_focus(&self, pane: &str) -> Result<()> {
         let result = self
             .conn
@@ -672,6 +693,32 @@ mod tests {
             params[2],
             json!({ "plugin_id": "conductor-deck", "entrypoint": "deck", "placement": "split",
                     "direction": "right", "target_pane_id": "w1:p1" })
+        );
+    }
+
+    #[test]
+    fn opens_popups_with_env() {
+        let server = TestServer::start(vec![
+            respond(json!({ "type": "ok" })),
+            respond_error("ui_busy"),
+        ]);
+        let herdr = client(&server);
+        let env = vec![
+            ("CONDUCTOR_DECK_TASK".to_owned(), "t".to_owned()),
+            ("CONDUCTOR_DECK_PANE".to_owned(), "w2:p1".to_owned()),
+        ];
+        herdr
+            .plugin_popup_open("conductor-deck", "decide", &env)
+            .unwrap();
+        assert!(matches!(
+            herdr.plugin_popup_open("conductor-deck", "decide", &env),
+            Err(HerdrError::UiBusy(_))
+        ));
+        assert_eq!(server.methods(), ["plugin.pane.open", "plugin.pane.open"]);
+        assert_eq!(
+            server.requests()[0]["params"],
+            json!({ "plugin_id": "conductor-deck", "entrypoint": "decide", "placement": "popup",
+                    "env": { "CONDUCTOR_DECK_TASK": "t", "CONDUCTOR_DECK_PANE": "w2:p1" } })
         );
     }
 

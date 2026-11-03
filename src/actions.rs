@@ -8,9 +8,11 @@ use std::process::{Command, Output, Stdio};
 
 use conductor_state::read_repo_record;
 
+use crate::decide;
 use crate::deck::CardModel;
 use crate::herdr::types::{AgentStatus, PluginContext};
 use crate::herdr::{HerdrClient, HerdrError};
+use crate::toggle::PLUGIN_ID;
 use crate::ui::{Answer, DecisionModal};
 
 const BLOCKED: &str = "worker is waiting on a prompt; press Enter to focus it";
@@ -74,6 +76,66 @@ pub fn start_decision(card: &CardModel) -> Result<DecisionModal, String> {
     .ok_or_else(|| format!("{}: no open decisions", card.task.id))
 }
 
+/// Opens the card's open decisions in a popup centered over herdr. Returns the modal to draw in
+/// the deck instead when herdr can't open the popup, and the toast to show, if any.
+pub fn decide(
+    herdr: &impl HerdrClient,
+    card: &CardModel,
+    repo_id: &str,
+) -> (Option<DecisionModal>, Option<String>) {
+    let modal = match start_decision(card) {
+        Ok(modal) => modal,
+        Err(toast) => return (None, Some(toast)),
+    };
+    let request = decide::Request {
+        task_id: card.task.id.clone(),
+        repo_id: repo_id.to_owned(),
+        pane: card.pane().map(ToOwned::to_owned),
+    };
+    match herdr.plugin_popup_open(PLUGIN_ID, decide::ENTRYPOINT, &request.env()) {
+        Ok(()) => (None, None),
+        // Settings, copy mode or another popup is open.
+        Err(HerdrError::UiBusy(_)) => (Some(modal), None),
+        Err(err) => (Some(modal), Some(format!("popup failed: {err}"))),
+    }
+}
+
+/// How answering a decision went, with the toast that says so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answered {
+    /// Recorded, and the worker was told.
+    Told(String),
+    /// Recorded, but the worker couldn't be told.
+    Untold(String),
+    /// Not recorded.
+    Failed(String),
+}
+
+impl Answered {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Told(message) | Self::Untold(message) | Self::Failed(message) => message,
+        }
+    }
+}
+
+/// Records `answer` with the conductor CLI at `bin`, found by [`conductor_bin`], and tells the
+/// worker. The deck's modal and the `decide` popup both answer through here.
+pub fn submit_answer(
+    herdr: &impl HerdrClient,
+    run: impl FnOnce(&Path, &[String]) -> io::Result<Output>,
+    bin: Option<&Path>,
+    repo_id: &str,
+    task_id: &str,
+    pane: Option<&str>,
+    answer: &Answer,
+) -> Answered {
+    match bin {
+        Some(bin) => answer_decision(herdr, run, bin, repo_id, task_id, pane, answer),
+        None => Answered::Failed("set CONDUCTOR_BIN or HOME to find conductor".to_owned()),
+    }
+}
+
 /// Records `answer` by running the conductor CLI at `bin` with `run`, since only the CLI writes
 /// conductor state, then tells the worker in `pane`. The worker is told only once the answer is
 /// recorded; if it can't be told, the answer stands and the toast says so.
@@ -85,7 +147,7 @@ pub fn answer_decision(
     task_id: &str,
     pane: Option<&str>,
     answer: &Answer,
-) -> String {
+) -> Answered {
     let mut args = vec![
         "decision".to_owned(),
         "answer".to_owned(),
@@ -101,28 +163,32 @@ pub fn answer_decision(
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let reason = stderr.lines().rfind(|line| !line.trim().is_empty());
-            return match reason {
+            return Answered::Failed(match reason {
                 Some(reason) => format!("answer failed: {}", reason.trim()),
                 None => format!("answer failed: conductor exited with {}", output.status),
-            };
+            });
         }
-        Err(err) => return format!("couldn't run {}: {err}", bin.display()),
+        Err(err) => return Answered::Failed(format!("couldn't run {}: {err}", bin.display())),
     }
     let key = &answer.key;
     let Some(pane) = pane else {
-        return format!("answered {key}; {}", gone(task_id));
+        return Answered::Untold(format!("answered {key}; {}", gone(task_id)));
     };
     let prompt = format!(
         "Decision {key} answered: {}. Check `conductor decision list` and continue.",
         answer.label
     );
     match herdr.agent_prompt(pane, &prompt) {
-        Ok(()) => format!("answered {key} for {task_id}"),
-        Err(HerdrError::AgentBlocked(_)) => {
-            format!("answered {key}; worker is waiting on a prompt, so it wasn't told")
+        Ok(()) => Answered::Told(format!("answered {key} for {task_id}")),
+        Err(HerdrError::AgentBlocked(_)) => Answered::Untold(format!(
+            "answered {key}; worker is waiting on a prompt, so it wasn't told"
+        )),
+        Err(HerdrError::NotFound { .. }) => {
+            Answered::Untold(format!("answered {key}; {}", gone(task_id)))
         }
-        Err(HerdrError::NotFound { .. }) => format!("answered {key}; {}", gone(task_id)),
-        Err(err) => format!("answered {key}, but couldn't tell the worker: {err}"),
+        Err(err) => Answered::Untold(format!(
+            "answered {key}, but couldn't tell the worker: {err}"
+        )),
     }
 }
 
@@ -221,10 +287,38 @@ pub fn focus_conductor(
 }
 
 #[cfg(test)]
+pub mod testing {
+    use std::cell::RefCell;
+    use std::io;
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::path::{Path, PathBuf};
+    use std::process::{ExitStatus, Output};
+
+    /// The runs a [`runner`] recorded: the binary and its arguments.
+    pub type Runs = RefCell<Vec<(PathBuf, Vec<String>)>>;
+
+    /// A runner that records each run and exits with `code`, printing `stderr`.
+    pub fn runner<'a>(
+        runs: &'a Runs,
+        code: i32,
+        stderr: &'a str,
+    ) -> impl FnOnce(&Path, &[String]) -> io::Result<Output> + 'a {
+        move |bin, args| {
+            runs.borrow_mut().push((bin.to_owned(), args.to_vec()));
+            Ok(Output {
+                status: ExitStatus::from_raw(code << 8),
+                stdout: Vec::new(),
+                stderr: stderr.as_bytes().to_vec(),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::os::unix::process::ExitStatusExt as _;
-    use std::process::ExitStatus;
+
+    use super::testing::runner;
 
     use conductor_state::{Phase, RepoRecord, SchemaV1, write_repo_record_atomic};
 
@@ -339,22 +433,6 @@ mod tests {
         }
     }
 
-    /// A runner that records each run and exits with `code`, printing `stderr`.
-    fn runner<'a>(
-        runs: &'a RefCell<Vec<(PathBuf, Vec<String>)>>,
-        code: i32,
-        stderr: &'a str,
-    ) -> impl FnOnce(&Path, &[String]) -> io::Result<Output> + 'a {
-        move |bin, args| {
-            runs.borrow_mut().push((bin.to_owned(), args.to_vec()));
-            Ok(Output {
-                status: ExitStatus::from_raw(code << 8),
-                stdout: Vec::new(),
-                stderr: stderr.as_bytes().to_vec(),
-            })
-        }
-    }
-
     const BIN: &str = "/home/u/.cargo/bin/conductor";
     const PROMPT: &str =
         "Decision db-engine answered: SQLite. Check `conductor decision list` and continue.";
@@ -364,8 +442,8 @@ mod tests {
         run: impl FnOnce(&Path, &[String]) -> io::Result<Output>,
         pane: Option<&str>,
         answer: &Answer,
-    ) -> String {
-        answer_decision(herdr, run, Path::new(BIN), REPO_ID, "t", pane, answer)
+    ) -> Answered {
+        submit_answer(herdr, run, Some(Path::new(BIN)), REPO_ID, "t", pane, answer)
     }
 
     fn strings(args: &[&str]) -> Vec<String> {
@@ -379,11 +457,11 @@ mod tests {
         let note = answer(Some("tests run on it"));
         assert_eq!(
             answer_with(&herdr, runner(&runs, 0, ""), Some("w2:p1"), &note),
-            "answered db-engine for t"
+            Answered::Told("answered db-engine for t".into())
         );
         assert_eq!(
             answer_with(&herdr, runner(&runs, 0, ""), Some("w2:p1"), &answer(None)),
-            "answered db-engine for t"
+            Answered::Told("answered db-engine for t".into())
         );
         let common = ["--by", "deck", "--task", "t", "--repo", REPO_ID];
         let with_note = [
@@ -425,19 +503,37 @@ mod tests {
                 Some("w2:p1"),
                 &answer(None)
             ),
-            "answer failed: Error: decision `db-engine` was already answered: `pg` by user"
+            Answered::Failed(
+                "answer failed: Error: decision `db-engine` was already answered: `pg` by user"
+                    .into()
+            )
         );
         let silent = answer_with(&herdr, runner(&runs, 2, ""), Some("w2:p1"), &answer(None));
         assert!(
-            silent.starts_with("answer failed: conductor exited with"),
-            "{silent}"
+            matches!(&silent, Answered::Failed(m) if m.starts_with("answer failed: conductor exited with")),
+            "{silent:?}"
         );
         let missing = |_: &Path, _: &[String]| Err(io::Error::from(io::ErrorKind::NotFound));
         let toast = answer_with(&herdr, missing, Some("w2:p1"), &answer(None));
         assert!(
-            toast.starts_with(&format!("couldn't run {BIN}: ")),
-            "{toast}"
+            matches!(&toast, Answered::Failed(m) if m.starts_with(&format!("couldn't run {BIN}: "))),
+            "{toast:?}"
         );
+        // Without a binary to run, nothing runs.
+        let none = submit_answer(
+            &herdr,
+            runner(&runs, 0, ""),
+            None,
+            REPO_ID,
+            "t",
+            Some("w2:p1"),
+            &answer(None),
+        );
+        assert_eq!(
+            none,
+            Answered::Failed("set CONDUCTOR_BIN or HOME to find conductor".into())
+        );
+        assert_eq!(runs.borrow().len(), 2);
         assert_eq!(herdr.actions(), []);
     }
 
@@ -458,7 +554,7 @@ mod tests {
         for (pane, toast) in cases {
             assert_eq!(
                 answer_with(&herdr, runner(&runs, 0, ""), pane, &answer(None)),
-                toast
+                Answered::Untold(toast.to_owned())
             );
         }
         assert_eq!(runs.borrow().len(), 3);
@@ -475,6 +571,54 @@ mod tests {
         card.open_decisions = vec![decision("db-engine", &[("pg", "Postgres", None)])];
         let modal = start_decision(&card).unwrap();
         assert_eq!((modal.task_id(), modal.pane()), ("t", Some("w2:p1")));
+    }
+
+    fn deciding_card() -> CardModel {
+        let mut card = card(Some("w2:p1"), None);
+        card.open_decisions = vec![decision("db-engine", &[("pg", "Postgres", None)])];
+        card
+    }
+
+    #[test]
+    fn d_opens_a_popup_with_the_task_repo_and_worker() {
+        let herdr = fake(None);
+        let (modal, toast) = decide(&herdr, &deciding_card(), REPO_ID);
+        assert!(modal.is_none());
+        assert_eq!(toast, None);
+        let env = [
+            ("CONDUCTOR_DECK_TASK", "t"),
+            ("CONDUCTOR_DECK_REPO", REPO_ID),
+            ("CONDUCTOR_DECK_PANE", "w2:p1"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        assert_eq!(
+            herdr.actions(),
+            [Action::OpenPopup {
+                plugin: "conductor-deck".into(),
+                entrypoint: "decide".into(),
+                env: env.to_vec(),
+            }]
+        );
+    }
+
+    #[test]
+    fn d_falls_back_to_the_deck_while_herdr_is_busy() {
+        let herdr = fake(None);
+        herdr.busy();
+        let (modal, toast) = decide(&herdr, &deciding_card(), REPO_ID);
+        let modal = modal.expect("the in-deck modal");
+        assert_eq!((modal.task_id(), modal.pane()), ("t", Some("w2:p1")));
+        assert_eq!(toast, None);
+        assert_eq!(herdr.actions(), []);
+    }
+
+    #[test]
+    fn d_without_decisions_opens_nothing() {
+        let herdr = fake(None);
+        let (modal, toast) = decide(&herdr, &card(Some("w2:p1"), None), REPO_ID);
+        assert!(modal.is_none());
+        assert_eq!(toast.as_deref(), Some("t: no open decisions"));
+        assert_eq!(herdr.actions(), []);
     }
 
     #[test]

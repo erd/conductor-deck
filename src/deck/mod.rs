@@ -216,15 +216,22 @@ impl Deck {
             .tasks
             .values()
             .filter(|state| self.show_hidden || !hidden_by_default(state.task.phase))
-            .map(|state| {
-                let agent = pane_of(state)
-                    .and_then(|pane| self.agents.get(pane))
-                    .and_then(|entry| entry.info.as_ref());
-                CardModel::new(state, agent)
-            })
+            .map(|state| self.card_of(state))
             .collect();
         card::sort(&mut cards);
         cards
+    }
+
+    /// Task `id`'s card, whether or not it's hidden.
+    pub fn card(&self, id: &str) -> Option<CardModel> {
+        self.tasks.get(id).map(|state| self.card_of(state))
+    }
+
+    fn card_of(&self, state: &TaskState) -> CardModel {
+        let agent = pane_of(state)
+            .and_then(|pane| self.agents.get(pane))
+            .and_then(|entry| entry.info.as_ref());
+        CardModel::new(state, agent)
     }
 
     fn fetch(&mut self, herdr: &impl HerdrClient, pane: &str, now: Instant) -> herdr::Result<()> {
@@ -366,6 +373,13 @@ mod tests {
         assert_eq!(ids(&deck), ["live", "merged"].map(String::from).into());
         deck.show_hidden = true;
         assert_eq!(ids(&deck).len(), 4);
+        // One card is found by id even while hidden.
+        deck.show_hidden = false;
+        assert_eq!(
+            deck.card("down").map(|c| c.task.id).as_deref(),
+            Some("down")
+        );
+        assert!(deck.card("nope").is_none());
     }
 
     #[test]
