@@ -1,0 +1,32 @@
+name: Release
+
+# release-please keeps a release PR open that bumps package.json and CHANGELOG.md from the
+# conventional commits since the last v* tag. Merging it tags v<version> and creates the GitHub
+# release.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # Opens the PR as the release app rather than GITHUB_TOKEN, so CI runs on it.
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
