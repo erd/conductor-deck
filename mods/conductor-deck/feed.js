@@ -92,6 +92,9 @@ export function lastLine(stderr) {
   return lines.length ? lines[lines.length - 1] : null;
 }
 
+/** Where to look for the conductor CLI: on PATH, then where `cargo install` puts it. */
+export const conductorBins = (home) => ["conductor", `${home}/.cargo/bin/conductor`];
+
 // ---- argv ----------------------------------------------------------------------------------
 
 export const feedArgv = () => ["deck", "--json"];
@@ -168,9 +171,6 @@ export function parseDecisions(stdout) {
 // ---- PRs -----------------------------------------------------------------------------------
 
 export const isWebUrl = (url) => /^https?:\/\//.test(url ?? "");
-
-/** The program that opens a URL in the browser, by `window().platform`. */
-export const opener = (platform) => (platform === "macos" ? "open" : "xdg-open");
 
 /** Why the PR can't be opened, or null if `url` can be. */
 export function prProblem(id, url) {

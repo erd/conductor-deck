@@ -1,0 +1,5 @@
+{
+  "global": {
+    "cmd-shift-k": { "command": "pane.split", "args": { "direction": "right", "mod": "conductor-deck" } }
+  }
+}

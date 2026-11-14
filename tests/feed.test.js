@@ -2,8 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  BLOCKED, answerArgv, answerFailed, answeredResult, continuePrompt, decisionListArgv, feedArgv,
-  gone, lastLine, mergeLastGood, messageResult, opener, parseDecisions, parseFeed, problem,
+  BLOCKED, answerArgv, conductorBins, answerFailed, answeredResult, continuePrompt, decisionListArgv, feedArgv,
+  gone, lastLine, mergeLastGood, messageResult, parseDecisions, parseFeed, problem,
   prProblem, sendArgv, sendOutcome,
 } from "../mods/conductor-deck/feed.js";
 import { buildCards } from "../mods/conductor-deck/model.js";
@@ -150,10 +150,12 @@ test("parses conductor decision list", () => {
 });
 
 test("opening PRs", () => {
-  assert.equal(opener("macos"), "open");
-  assert.equal(opener("linux"), "xdg-open");
   assert.equal(prProblem("fix-07", null), "fix-07: no PR yet");
   assert.equal(prProblem("fix-07", "file:///etc/passwd"), "not a web URL: file:///etc/passwd");
   assert.equal(prProblem("fix-07", "https://github.com/erd/web/pull/42"), null);
   assert.equal(prProblem("fix-07", "http://example.com"), null);
+});
+
+test("looks for conductor on PATH, then in ~/.cargo/bin", () => {
+  assert.deepEqual(conductorBins("/Users/me"), ["conductor", "/Users/me/.cargo/bin/conductor"]);
 });
