@@ -1,6 +1,6 @@
 {
   "name": "conductor-deck",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A Herdr mod showing conductor's tasks as cards beside the conductor",
   "license": "Apache-2.0",
   "type": "module",
