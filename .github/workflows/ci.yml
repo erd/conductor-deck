@@ -9,9 +9,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   check:
     name: check (${{ matrix.os }})
@@ -22,9 +19,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      # Installs the toolchain and components pinned in rust-toolchain.toml.
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      # Syntax-checks every module, including the ones that import Herdr's runtime and so can't
+      # be loaded by node.
+      - run: for f in mods/conductor-deck/*.js; do node --check "$f"; done
+      - run: npm test

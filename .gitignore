@@ -1,2 +1,5 @@
-/target
 /.worktrees/
+/node_modules/
+# Written by Herdr into a mod's folder; not part of the mod.
+mods/conductor-deck/gpui-kit.d.ts
+mods/conductor-deck/jsconfig.json
